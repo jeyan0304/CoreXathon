@@ -6,7 +6,6 @@ import {
   Wrench,
   FileText,
   ShieldCheck,
-  Sparkles,
 } from 'lucide-react';
 
 export type ActiveTab = 'dashboard' | 'workflow' | 'tools' | 'audit';
@@ -35,9 +34,6 @@ export const Navbar: React.FC<NavbarProps> = ({
               <div className="flex items-center gap-2">
                 <span className="text-base font-bold tracking-tight text-slate-900">
                   CoreX <span className="text-blue-600">Task Planner</span>
-                </span>
-                <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-700 border border-blue-200">
-                  Person 1 UI
                 </span>
               </div>
               <p className="text-[11px] text-slate-500 font-medium">
@@ -106,16 +102,11 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           </nav>
 
-          {/* Right Status / Hackathon Badge */}
+          {/* Right Status */}
           <div className="flex items-center gap-3">
             <div className="hidden sm:flex items-center gap-1.5 rounded-lg bg-emerald-50 border border-emerald-200 px-2.5 py-1 text-xs text-emerald-800 font-medium">
               <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />
               <span>Safety Checkpoint: Active</span>
-            </div>
-
-            <div className="flex items-center gap-1.5 rounded-lg bg-slate-100 border border-slate-200 px-2.5 py-1 text-xs text-slate-700 font-mono">
-              <Sparkles className="h-3 w-3 text-amber-500" />
-              <span>Demo Mode</span>
             </div>
           </div>
         </div>

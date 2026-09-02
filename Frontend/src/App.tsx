@@ -6,7 +6,6 @@ import { WorkflowExecutionPage } from './pages/WorkflowExecutionPage';
 import { ToolRegistryPage } from './pages/ToolRegistryPage';
 import { AuditTrailPage } from './pages/AuditTrailPage';
 import { apiService } from './services/api';
-import { ShieldCheck } from 'lucide-react';
 
 export function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('workflow');
@@ -41,28 +40,6 @@ export function App() {
         setActiveTab={setActiveTab}
         pendingApprovalsCount={pendingApprovalsCount}
       />
-
-      {/* Sub-header Banner - Team Roles & Status */}
-      <div className="border-b border-slate-200 bg-white/60 px-4 py-2 text-xs">
-        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2 text-slate-500">
-          <div className="flex items-center gap-2">
-            <span className="flex h-2 w-2 rounded-full bg-emerald-500"></span>
-            <span className="font-semibold text-slate-700">Team Contract:</span>
-            <span>Person 1 (Frontend + AI Integration)</span>
-            <span className="text-slate-300">|</span>
-            <span>Person 2 (Backend + Supabase)</span>
-            <span className="text-slate-300">|</span>
-            <span>Person 3 (AI Agent)</span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" />
-            <span className="font-medium text-slate-700">
-              Safety Checkpoint: Active
-            </span>
-          </div>
-        </div>
-      </div>
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-6 pb-12">
