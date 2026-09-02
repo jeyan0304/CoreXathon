@@ -208,11 +208,20 @@ class WorkflowControlGate:
 
     def getWorkflow(self, userId: UUID, workflowId: Any) -> Dict[str, Any]:
         workflow = self._requireWorkflow(userId, workflowId)
-        return {
-            **workflow,
-            "steps": self.database.listSteps(workflowId),
-            "audit_logs": self.database.listAuditLogs(workflowId),
-        }
+        steps = []
+        for step in self.database.listSteps(workflowId):
+            tool = self.database.getTool(step["tool_id"])
+            steps.append(
+                {
+                    **step,
+                    "tool_name": tool["name"] if tool else None,
+                    "requires_approval": bool(tool and tool["requires_approval"]),
+                }
+            )
+        return {**workflow, "steps": steps}
+
+    def listWorkflows(self, userId: UUID) -> List[Dict[str, Any]]:
+        return [self.getWorkflow(userId, workflow["id"]) for workflow in self.database.listWorkflows(userId)]
 
     def storePlan(
         self, userId: UUID, workflowId: Any, proposedSteps: Any
@@ -224,24 +233,7 @@ class WorkflowControlGate:
             )
         if self.database.listSteps(workflowId):
             raise ControlGateError("PLAN_ALREADY_EXISTS", "This workflow already has a plan.", 409)
-        if not isinstance(proposedSteps, list) or not proposedSteps:
-            raise ControlGateError("MALFORMED_PLAN", "Plan must contain a list of steps.")
-        if len(proposedSteps) > MAX_STEPS:
-            raise ControlGateError(
-                "STEP_LIMIT_EXCEEDED", "A workflow cannot contain more than 10 steps."
-            )
-
-        validated = []
-        for proposed in proposedSteps:
-            if not isinstance(proposed, dict) or set(proposed) != {"tool_name", "arguments"}:
-                raise ControlGateError("MALFORMED_PLAN", "Each plan step is malformed.")
-            tool = self.database.getToolByName(proposed["tool_name"])
-            if tool is None or tool["name"] not in self.executors:
-                raise ControlGateError(
-                    "UNKNOWN_TOOL", "The requested tool is not registered."
-                )
-            self._validateArguments(tool, proposed["arguments"])
-            validated.append((tool, proposed["arguments"]))
+        validated = self.validatePlan(proposedSteps)
 
         steps = [
             self.database.createStep(
@@ -261,6 +253,28 @@ class WorkflowControlGate:
             {"step_count": len(steps)},
         )
         return steps
+
+    def validatePlan(self, proposedSteps: Any) -> List[Any]:
+        """Validate an untrusted AI plan without persisting workflow state."""
+        if not isinstance(proposedSteps, list) or not proposedSteps:
+            raise ControlGateError("MALFORMED_PLAN", "Plan must contain a list of steps.")
+        if len(proposedSteps) > MAX_STEPS:
+            raise ControlGateError(
+                "STEP_LIMIT_EXCEEDED", "A workflow cannot contain more than 10 steps."
+            )
+
+        validated = []
+        for proposed in proposedSteps:
+            if not isinstance(proposed, dict) or set(proposed) != {"tool_name", "arguments"}:
+                raise ControlGateError("MALFORMED_PLAN", "Each plan step is malformed.")
+            tool = self.database.getToolByName(proposed["tool_name"])
+            if tool is None or tool["name"] not in self.executors:
+                raise ControlGateError(
+                    "UNKNOWN_TOOL", "The requested tool is not registered."
+                )
+            self._validateArguments(tool, proposed["arguments"])
+            validated.append((tool, proposed["arguments"]))
+        return validated
 
     def _executeStep(
         self, workflow: Dict[str, Any], step: Dict[str, Any], actor: str
@@ -489,12 +503,6 @@ class WorkflowControlGate:
     def getTimeline(self, userId: UUID, workflowId: Any) -> List[Dict[str, Any]]:
         self._requireWorkflow(userId, workflowId)
         return self.database.listAuditLogs(workflowId)
-
-    def listWorkflows(self, userId: UUID) -> List[Dict[str, Any]]:
-        return self.database.listWorkflows(userId)
-
-    def listAllAuditLogs(self, userId: UUID) -> List[Dict[str, Any]]:
-        return self.database.listAllAuditLogs(userId)
 
     def getAuditLogs(self, userId: UUID, workflowId: Any) -> List[Dict[str, Any]]:
         return self.getTimeline(userId, workflowId)

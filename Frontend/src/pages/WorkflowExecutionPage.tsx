@@ -1,11 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import confetti from 'canvas-confetti';
-import type {
-  Workflow,
-  WorkflowStep,
-  PlannedStepPreview,
-  StepStatus,
-} from '../types';
+import type { Workflow, WorkflowStep, PlannedStepPreview } from '../types';
 import { apiService, parseErrorMessage } from '../services/api';
 import { PlanPreview } from '../components/PlanPreview';
 import { WorkflowTimeline } from '../components/WorkflowTimeline';
@@ -24,183 +19,6 @@ import {
   Loader2,
   Check,
 } from 'lucide-react';
-
-function getDefaultOutputForTool(toolName: string, args?: Record<string, unknown>): Record<string, unknown> {
-  switch (toolName) {
-    case 'search_information':
-      return {
-        records_found: 2,
-        matches: [
-          { id: 'apollo-repo-01', title: 'Sprint 14 Apollo Milestone', status: 'ON_TRACK' },
-          { id: 'apollo-db-09', title: 'Production Apollo Database Instance', health: '98%' },
-        ],
-        source: 'Project Documentation Search',
-      };
-    case 'update_record':
-      return {
-        updated: true,
-        table: (args?.table as string) || 'projects',
-        record_id: (args?.record_id as string) || 'proj_apollo_09',
-        rows_affected: 1,
-        timestamp: new Date().toISOString(),
-        verified_by: 'Safety Checkpoint',
-      };
-    case 'send_notification':
-      return {
-        delivery_status: 'SENT',
-        message_id: 'msg_slack_apollo_9921',
-        recipient: (args?.recipient as string) || '@apollo-leads',
-        delivered_at: new Date().toISOString(),
-      };
-    default:
-      return {
-        status: 'COMPLETED',
-        timestamp: new Date().toISOString(),
-      };
-  }
-}
-
-function mapAndSyncSteps(
-  rawSteps: WorkflowStep[] | undefined,
-  plan: PlannedStepPreview[] | null,
-  workflow: Workflow | null
-): WorkflowStep[] {
-  const isWorkflowCompleted = workflow?.status === 'COMPLETED';
-  const isWorkflowWaitingApproval = workflow?.status === 'WAITING_FOR_APPROVAL';
-  const workflowId = workflow?.id || 'wf-active';
-  const now = workflow?.created_at || new Date().toISOString();
-
-  // Normalize incoming steps from backend
-  const normalizedIncoming: WorkflowStep[] = Array.isArray(rawSteps)
-    ? rawSteps.map((s, idx) => {
-        const stepOrder = s.step_order || (idx + 1);
-        const toolName = s.tool_name || (plan && plan[idx]?.tool_name) || `action_${idx + 1}`;
-        const requiresApproval = Boolean(
-          s.requires_approval ??
-          (plan && plan.find((p) => p.step_order === stepOrder || p.tool_name === toolName)?.requires_approval) ??
-          (toolName === 'update_record' || stepOrder === 2)
-        );
-
-        let rawStatus = String(s.status || '').toUpperCase();
-        if (isWorkflowCompleted) {
-          if (rawStatus !== 'FAILED' && rawStatus !== 'ABORTED') {
-            rawStatus = 'COMPLETED';
-          }
-        } else if (isWorkflowWaitingApproval) {
-          if ((requiresApproval || stepOrder === 2 || toolName === 'update_record') && rawStatus !== 'COMPLETED' && rawStatus !== 'FAILED' && rawStatus !== 'ABORTED') {
-            rawStatus = 'WAITING_FOR_APPROVAL';
-          } else if (stepOrder < 2 && (!rawStatus || rawStatus === 'PENDING')) {
-            rawStatus = 'COMPLETED';
-          }
-        }
-        if (!rawStatus) rawStatus = 'PENDING';
-        const status: StepStatus = (rawStatus as StepStatus);
-
-        return {
-          id: s.id || `step-${workflowId}-${stepOrder}`,
-          workflow_id: s.workflow_id || workflowId,
-          tool_id: s.tool_id || (toolName === 'search_information' ? 'tool-001' : toolName === 'update_record' ? 'tool-002' : 'tool-003'),
-          tool_name: toolName,
-          step_order: stepOrder,
-          arguments: s.arguments && Object.keys(s.arguments).length > 0
-            ? s.arguments
-            : (plan && plan[idx]?.arguments) || {},
-          output: s.output || (isWorkflowCompleted ? getDefaultOutputForTool(toolName, s.arguments) : null),
-          error_message: s.error_message || null,
-          status,
-          retry_count: s.retry_count || 0,
-          requires_approval: requiresApproval,
-          created_at: s.created_at || now,
-        };
-      })
-    : [];
-
-  // If a plan exists (e.g., the 3 planned steps for the demo), ensure all steps are represented and mapped
-  if (plan && plan.length > 0) {
-    const merged: WorkflowStep[] = plan.map((p, idx) => {
-      const match = normalizedIncoming.find(
-        (s) => s.step_order === p.step_order || s.tool_name === p.tool_name
-      );
-
-      const requiresApproval = Boolean(
-        match?.requires_approval ??
-        p.requires_approval ??
-        (p.tool_name === 'update_record' || p.step_order === 2)
-      );
-
-      if (match) {
-        let stepStatus = match.status;
-        if (isWorkflowCompleted && stepStatus !== 'FAILED' && stepStatus !== 'ABORTED') {
-          stepStatus = 'COMPLETED';
-        } else if (isWorkflowWaitingApproval) {
-          if ((requiresApproval || p.step_order === 2 || p.tool_name === 'update_record') && stepStatus !== 'COMPLETED' && stepStatus !== 'FAILED' && stepStatus !== 'ABORTED') {
-            stepStatus = 'WAITING_FOR_APPROVAL';
-          } else if ((p.step_order < 2 || p.tool_name === 'search_information') && (stepStatus === 'PENDING' || !stepStatus)) {
-            stepStatus = 'COMPLETED';
-          }
-        }
-
-        return {
-          ...match,
-          step_order: p.step_order || idx + 1,
-          arguments: match.arguments && Object.keys(match.arguments).length > 0 ? match.arguments : p.arguments,
-          status: stepStatus,
-          requires_approval: requiresApproval,
-          output: match.output || (stepStatus === 'COMPLETED' ? getDefaultOutputForTool(p.tool_name, p.arguments) : null),
-        };
-      }
-
-      // If this planned step wasn't in rawSteps yet
-      let stepStatus: StepStatus = 'PENDING';
-      if (isWorkflowCompleted) {
-        stepStatus = 'COMPLETED';
-      } else if (isWorkflowWaitingApproval) {
-        if (requiresApproval || p.step_order === 2 || p.tool_name === 'update_record') {
-          stepStatus = 'WAITING_FOR_APPROVAL';
-        } else if (p.step_order < 2 || p.tool_name === 'search_information') {
-          stepStatus = 'COMPLETED';
-        }
-      }
-
-      return {
-        id: `step-${workflowId}-${p.step_order || idx + 1}`,
-        workflow_id: workflowId,
-        tool_id: p.tool_name === 'search_information' ? 'tool-001' : p.tool_name === 'update_record' ? 'tool-002' : 'tool-003',
-        tool_name: p.tool_name,
-        step_order: p.step_order || idx + 1,
-        arguments: p.arguments || {},
-        output: stepStatus === 'COMPLETED' ? getDefaultOutputForTool(p.tool_name, p.arguments) : null,
-        error_message: null,
-        status: stepStatus,
-        requires_approval: requiresApproval,
-        retry_count: 0,
-        created_at: now,
-      };
-    });
-
-    // Append any extra incoming steps that weren't in plan
-    normalizedIncoming.forEach((inc) => {
-      if (!merged.some((m) => m.id === inc.id || m.step_order === inc.step_order)) {
-        merged.push(inc);
-      }
-    });
-
-    return merged.sort((a, b) => a.step_order - b.step_order);
-  }
-
-  // If no plan, return normalized incoming
-  if (normalizedIncoming.length > 0) {
-    if (isWorkflowCompleted) {
-      return normalizedIncoming.map((s) => ({
-        ...s,
-        status: s.status === 'FAILED' || s.status === 'ABORTED' ? s.status : 'COMPLETED',
-        output: s.output || getDefaultOutputForTool(s.tool_name, s.arguments),
-      }));
-    }
-    return normalizedIncoming.sort((a, b) => a.step_order - b.step_order);
-  }
-  return normalizedIncoming;
-}
 
 interface WorkflowExecutionPageProps {
   onNavigateToAudit: (workflowId?: string) => void;
@@ -225,6 +43,8 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
   const [hasTriggeredConfetti, setHasTriggeredConfetti] = useState(false);
 
   const workflowId = activeWorkflow?.id;
+  const waitingApprovalStep = steps.find((step) => step.status === 'WAITING_FOR_APPROVAL');
+  const failedStep = steps.find((step) => step.status === 'FAILED');
 
   // Subscribe to realtime workflow updates when activeWorkflow is set
   useEffect(() => {
@@ -240,7 +60,7 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
         updated_at: data.updated_at,
       };
       setActiveWorkflow(updatedWf);
-      setSteps(mapAndSyncSteps(data.steps, currentPlan, updatedWf));
+      setSteps(data.steps);
 
       // Trigger celebratory confetti once when completed
       if (data.status === 'COMPLETED' && !hasTriggeredConfetti) {
@@ -275,7 +95,7 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
       if (res.success) {
         setActiveWorkflow(res.data.workflow);
         setCurrentPlan(res.data.plan);
-        setSteps(mapAndSyncSteps(res.data.workflow.steps, res.data.plan, res.data.workflow));
+        setSteps(res.data.workflow.steps || []);
       } else {
         setErrorMessage(parseErrorMessage(res.error, 'Error creating plan'));
       }
@@ -297,13 +117,7 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
       if (res.success) {
         const wf = res.data.workflow;
         setActiveWorkflow(wf);
-        const incomingSteps = (res.data.steps && res.data.steps.length > 0)
-          ? res.data.steps
-          : (wf.steps && wf.steps.length > 0)
-          ? wf.steps
-          : [];
-        const synced = mapAndSyncSteps(incomingSteps, currentPlan, wf);
-        setSteps(synced);
+        setSteps(res.data.steps || []);
 
         if (wf.status === 'COMPLETED' && !hasTriggeredConfetti) {
           setHasTriggeredConfetti(true);
@@ -334,44 +148,11 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
       // Strictly pass explicit workflowId and stepId with Bearer token & approved: true
       const res = await apiService.approveStep(activeWorkflow.id, stepId);
       if (res.success) {
-        const returnedWf = res.data.workflow;
-        const returnedStep = res.data.step;
-        const returnedSteps = res.data.steps;
-
-        // Immediate UI State Transition:
-        // Update activeWorkflow with the freshly re-fetched backend workflow state
-        setActiveWorkflow(returnedWf);
-
-        // Immediate Step State Transition:
-        // Update steps with freshly re-fetched steps or transition approved step to COMPLETED
-        if (Array.isArray(returnedSteps) && returnedSteps.length > 0) {
-          const synced = mapAndSyncSteps(returnedSteps, currentPlan, returnedWf);
-          setSteps(synced);
-        } else {
-          setSteps((prevSteps) => {
-            return prevSteps.map((s) => {
-              if (s.id === stepId || s.step_order === returnedStep?.step_order || s.step_order === 2) {
-                return {
-                  ...s,
-                  ...returnedStep,
-                  status: 'COMPLETED' as StepStatus,
-                  requires_approval: false,
-                  output: returnedStep?.output !== undefined && returnedStep?.output !== null ? returnedStep.output : s.output,
-                };
-              }
-              return s;
-            });
-          });
-        }
-
-        // Check if workflow reached completion and trigger celebration
-        if (returnedWf.status === 'COMPLETED' && !hasTriggeredConfetti) {
+        setActiveWorkflow(res.data.workflow);
+        setSteps(res.data.steps || []);
+        if (res.data.workflow.status === 'COMPLETED' && !hasTriggeredConfetti) {
           setHasTriggeredConfetti(true);
-          confetti({
-            particleCount: 80,
-            spread: 70,
-            origin: { y: 0.6 },
-          });
+          confetti({ particleCount: 80, spread: 70, origin: { y: 0.6 } });
         }
       } else {
         console.error('[WorkflowExecutionPage] Approval API error:', res.error);
@@ -394,30 +175,8 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
       // Strictly pass explicit workflowId, stepId, and reason
       const res = await apiService.rejectStep(activeWorkflow.id, stepId, reason);
       if (res.success) {
-        const returnedWf = res.data.workflow;
-        const returnedStep = res.data.step;
-
-        const updatedWf: Workflow = {
-          ...activeWorkflow,
-          ...returnedWf,
-          status: returnedWf?.status || 'ABORTED',
-        };
-        setActiveWorkflow(updatedWf);
-
-        // ONLY target that exact stepId without cascading
-        setSteps((prevSteps) =>
-          prevSteps.map((s) => {
-            if (s.id === stepId) {
-              return {
-                ...s,
-                ...returnedStep,
-                status: returnedStep.status || 'ABORTED',
-                error_message: returnedStep.error_message || reason || 'Action rejected by human operator.',
-              };
-            }
-            return s;
-          })
-        );
+        setActiveWorkflow(res.data.workflow);
+        setSteps(res.data.steps || []);
       } else {
         setErrorMessage(parseErrorMessage(res.error, 'Rejection failed'));
       }
@@ -436,40 +195,11 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
     try {
       const res = await apiService.retryStep(activeWorkflow.id, stepId);
       if (res.success) {
-        const completedWf: Workflow = {
-          ...activeWorkflow,
-          ...(res.data.workflow || {}),
-          status: 'COMPLETED',
-          updated_at: new Date().toISOString(),
-        };
-        setActiveWorkflow(completedWf);
-
-        // Update local React state for Step 3 from FAILED to COMPLETED and ensure all steps are finished
-        setSteps((prevSteps) => {
-          const updated = prevSteps.map((s) => {
-            if (s.id === stepId || s.step_order === 3 || s.tool_name === 'send_notification') {
-              return {
-                ...s,
-                status: 'COMPLETED' as StepStatus,
-                error_message: null,
-                retry_count: (s.retry_count || 0) + 1,
-                output: res.data.step.output || getDefaultOutputForTool('send_notification', s.arguments),
-              };
-            }
-            return s;
-          });
-          return mapAndSyncSteps(updated, currentPlan, completedWf);
-        });
-
-        // Trigger celebratory confetti once completed
-        if (!hasTriggeredConfetti) {
+        setActiveWorkflow(res.data.workflow);
+        setSteps(res.data.steps || []);
+        if (res.data.workflow.status === 'COMPLETED' && !hasTriggeredConfetti) {
           setHasTriggeredConfetti(true);
-          confetti({
-            particleCount: 80,
-            spread: 70,
-            origin: { y: 0.6 },
-            colors: ['#2563eb', '#10b981', '#f59e0b', '#6366f1'],
-          });
+          confetti({ particleCount: 80, spread: 70, origin: { y: 0.6 } });
         }
       } else {
         setErrorMessage(parseErrorMessage(res.error, 'Retry failed'));
@@ -537,11 +267,11 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
               3. Search (Done)
             </span>
             <span className="text-slate-300">→</span>
-            <span className={`px-2 py-0.5 rounded ${steps[1]?.status === 'WAITING_FOR_APPROVAL' ? 'bg-amber-100 text-amber-800 font-bold animate-pulse' : steps[1]?.status === 'COMPLETED' ? 'bg-emerald-100 text-emerald-800 font-bold' : 'bg-slate-100 text-slate-500'}`}>
+            <span className={`px-2 py-0.5 rounded ${waitingApprovalStep ? 'bg-amber-100 text-amber-800 font-bold animate-pulse' : steps.some((step) => step.requires_approval && step.status === 'COMPLETED') ? 'bg-emerald-100 text-emerald-800 font-bold' : 'bg-slate-100 text-slate-500'}`}>
               4. Your Approval
             </span>
             <span className="text-slate-300">→</span>
-            <span className={`px-2 py-0.5 rounded ${steps[2]?.status === 'FAILED' ? 'bg-rose-100 text-rose-800 font-bold' : steps[2]?.status === 'COMPLETED' ? 'bg-emerald-100 text-emerald-800 font-bold' : 'bg-slate-100 text-slate-500'}`}>
+            <span className={`px-2 py-0.5 rounded ${failedStep ? 'bg-rose-100 text-rose-800 font-bold' : steps.some((step) => step.retry_count > 0 && step.status === 'COMPLETED') ? 'bg-emerald-100 text-emerald-800 font-bold' : 'bg-slate-100 text-slate-500'}`}>
               5. Error & Retry
             </span>
             <span className="text-slate-300">→</span>
