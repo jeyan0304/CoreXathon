@@ -339,62 +339,40 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
         const returnedSteps = res.data.steps;
 
         // Immediate UI State Transition:
-        // Transition workflow state from 'WAITING_FOR_APPROVAL' to 'IN_PROGRESS' or 'COMPLETED'
-        let targetWorkflowStatus: StepStatus = 'IN_PROGRESS';
-        if (returnedWf?.status && returnedWf.status !== 'WAITING_FOR_APPROVAL') {
-          targetWorkflowStatus = returnedWf.status;
-        }
-
-        const updatedWf: Workflow = {
-          ...activeWorkflow,
-          ...returnedWf,
-          status: targetWorkflowStatus,
-        };
-        setActiveWorkflow(updatedWf);
+        // Update activeWorkflow with the freshly re-fetched backend workflow state
+        setActiveWorkflow(returnedWf);
 
         // Immediate Step State Transition:
-        // Update the approved step to COMPLETED and remove approval flag so ApprovalCard unmounts
-        setSteps((prevSteps) => {
-          let updatedList = prevSteps.map((s) => {
-            if (s.id === stepId || s.step_order === returnedStep?.step_order) {
-              return {
-                ...s,
-                ...returnedStep,
-                status: (returnedStep?.status && returnedStep.status !== 'WAITING_FOR_APPROVAL'
-                  ? returnedStep.status
-                  : 'COMPLETED') as StepStatus,
-                requires_approval: false,
-                output: returnedStep?.output !== undefined && returnedStep?.output !== null ? returnedStep.output : s.output,
-              };
-            }
-            return s;
-          });
-
-          // If backend envelope provided a full steps array, merge
-          if (Array.isArray(returnedSteps) && returnedSteps.length > 0) {
-            updatedList = updatedList.map((s) => {
-              const match = returnedSteps.find((rs) => rs.id === s.id || rs.step_order === s.step_order);
-              return match ? { ...s, ...match } : s;
+        // Update steps with freshly re-fetched steps or transition approved step to COMPLETED
+        if (Array.isArray(returnedSteps) && returnedSteps.length > 0) {
+          const synced = mapAndSyncSteps(returnedSteps, currentPlan, returnedWf);
+          setSteps(synced);
+        } else {
+          setSteps((prevSteps) => {
+            return prevSteps.map((s) => {
+              if (s.id === stepId || s.step_order === returnedStep?.step_order || s.step_order === 2) {
+                return {
+                  ...s,
+                  ...returnedStep,
+                  status: 'COMPLETED' as StepStatus,
+                  requires_approval: false,
+                  output: returnedStep?.output !== undefined && returnedStep?.output !== null ? returnedStep.output : s.output,
+                };
+              }
+              return s;
             });
-          }
+          });
+        }
 
-          // Check if all steps are completed or backend workflow is COMPLETED
-          const allCompleted = updatedList.every((s) => s.status === 'COMPLETED');
-          if (allCompleted || returnedWf?.status === 'COMPLETED') {
-            updatedWf.status = 'COMPLETED';
-            setActiveWorkflow({ ...updatedWf, status: 'COMPLETED' });
-            if (!hasTriggeredConfetti) {
-              setHasTriggeredConfetti(true);
-              confetti({
-                particleCount: 80,
-                spread: 70,
-                origin: { y: 0.6 },
-              });
-            }
-          }
-
-          return updatedList;
-        });
+        // Check if workflow reached completion and trigger celebration
+        if (returnedWf.status === 'COMPLETED' && !hasTriggeredConfetti) {
+          setHasTriggeredConfetti(true);
+          confetti({
+            particleCount: 80,
+            spread: 70,
+            origin: { y: 0.6 },
+          });
+        }
       } else {
         console.error('[WorkflowExecutionPage] Approval API error:', res.error);
         setErrorMessage(parseErrorMessage(res.error, 'Approval failed'));
