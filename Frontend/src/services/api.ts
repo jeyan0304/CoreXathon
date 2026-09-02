@@ -40,8 +40,8 @@ export interface IWorkflowApiService {
   generatePlan?(goal: string): Promise<ApiResponse<CreateWorkflowResponse>>;
   submitGoal?(goal: string): Promise<ApiResponse<CreateWorkflowResponse>>;
   startExecution(workflowId: string): Promise<ApiResponse<{ workflow: Workflow; steps: WorkflowStep[] }>>;
-  approveStep(workflowIdOrStepId: string, stepIdOrApproved?: string | boolean, approved?: boolean): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep }>>;
-  rejectStep(workflowIdOrStepId: string, stepIdOrReason?: string, reason?: string): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep }>>;
+  approveStep(workflowId: string, stepId: string): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep }>>;
+  rejectStep(workflowId: string, stepId: string, reason?: string): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep }>>;
   retryStep(workflowId: string, stepId: string): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep }>>;
   abortWorkflow(workflowId: string): Promise<ApiResponse<{ workflow: Workflow }>>;
   getAuditLogs(workflowId?: string): Promise<ApiResponse<AuditLog[]>>;
@@ -435,46 +435,12 @@ export class RealWorkflowApiService implements IWorkflowApiService {
 
   /**
    * ACTION 2: Approve Step
-   * Strictly makes a POST request to ${BASE_URL}/api/workflows/${workflowId}/steps/${stepId}/approve-action
-   * Supports both signatures:
-   * - approveStep(stepId, true)
-   * - approveStep(workflowId, stepId, true?)
+   * Strictly passes explicit IDs to POST ${BASE_URL}/api/workflows/${workflowId}/steps/${stepId}/approve-action
    */
   async approveStep(
-    workflowIdOrStepId: string,
-    stepIdOrApproved?: string | boolean,
-    maybeApproved?: boolean
+    workflowId: string,
+    stepId: string
   ): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep }>> {
-    let workflowId = '';
-    let stepId = '';
-    let isApproved = true;
-
-    if (typeof stepIdOrApproved === 'boolean' || stepIdOrApproved === undefined) {
-      // Called as: approveStep(stepId, true)
-      stepId = workflowIdOrStepId;
-      isApproved = typeof stepIdOrApproved === 'boolean' ? stepIdOrApproved : true;
-
-      // Find workflowId by looking up stepId in active workflows
-      for (const [wId, stepsList] of this.steps.entries()) {
-        if (stepsList.some((s) => s.id === stepId)) {
-          workflowId = wId;
-          break;
-        }
-      }
-      if (!workflowId && this.workflows.size > 0) {
-        workflowId = Array.from(this.workflows.keys())[this.workflows.size - 1];
-      }
-    } else {
-      // Called as: approveStep(workflowId, stepId, approved?)
-      workflowId = workflowIdOrStepId;
-      stepId = stepIdOrApproved;
-      isApproved = maybeApproved ?? true;
-    }
-
-    if (!workflowId) {
-      workflowId = 'wf-active';
-    }
-
     try {
       const response = await fetch(`${this.baseUrl}/api/workflows/${workflowId}/steps/${stepId}/approve-action`, {
         method: 'POST',
@@ -482,7 +448,6 @@ export class RealWorkflowApiService implements IWorkflowApiService {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${DEMO_USER_UUID}`,
         },
-        body: JSON.stringify({ approved: isApproved }),
       });
 
       let json: unknown = null;
@@ -508,31 +473,39 @@ export class RealWorkflowApiService implements IWorkflowApiService {
       const rawStep = (data.step || data) as Record<string, unknown>;
       const rawWf = (data.workflow || {}) as Record<string, unknown>;
 
+      const existingWf = this.workflows.get(workflowId);
+      const existingStep = (this.steps.get(workflowId) || []).find((s) => s.id === stepId);
+
       const step: WorkflowStep = {
         id: String(rawStep.id || stepId),
         workflow_id: workflowId,
-        tool_id: String(rawStep.tool_id || rawStep.toolId || 'tool-002'),
-        tool_name: String(rawStep.tool_name || rawStep.toolName || 'update_record'),
-        step_order: Number(rawStep.step_order || rawStep.stepOrder || 2),
-        arguments: (rawStep.arguments as Record<string, unknown>) || {},
-        output: (rawStep.output as Record<string, unknown> | string) || {
-          updated: true,
-          timestamp: new Date().toISOString(),
-          verified_by: 'Safety Checkpoint',
-        },
-        error_message: null,
-        status: (rawStep.status as StepStatus) || 'COMPLETED',
-        retry_count: Number(rawStep.retry_count || 0),
-        created_at: String(rawStep.created_at || new Date().toISOString()),
+        tool_id: String(rawStep.tool_id || rawStep.toolId || existingStep?.tool_id || ''),
+        tool_name: String(rawStep.tool_name || rawStep.toolName || existingStep?.tool_name || ''),
+        step_order: Number(rawStep.step_order || rawStep.stepOrder || existingStep?.step_order || 1),
+        arguments: (rawStep.arguments as Record<string, unknown>) || existingStep?.arguments || {},
+        output: (rawStep.output as Record<string, unknown> | string | null) ?? existingStep?.output ?? null,
+        error_message: rawStep.error_message ? String(rawStep.error_message) : null,
+        status: (String(rawStep.status || rawStep.state || 'COMPLETED').toUpperCase() as StepStatus),
+        retry_count: Number(rawStep.retry_count ?? existingStep?.retry_count ?? 0),
+        created_at: String(rawStep.created_at || existingStep?.created_at || new Date().toISOString()),
       };
 
       const workflow: Workflow = {
+        ...(existingWf || {}),
         id: workflowId,
-        user_id: String(rawWf.user_id || 'user@company.com'),
-        goal: String(rawWf.goal || ''),
-        status: (rawWf.status as StepStatus) || 'RUNNING',
-        created_at: String(rawWf.created_at || new Date().toISOString()),
+        user_id: String(rawWf.user_id || existingWf?.user_id || 'user@company.com'),
+        goal: String(rawWf.goal || existingWf?.goal || ''),
+        status: (String(rawWf.status || rawWf.state || existingWf?.status || 'RUNNING').toUpperCase() as StepStatus),
+        created_at: String(rawWf.created_at || existingWf?.created_at || new Date().toISOString()),
+        updated_at: String(rawWf.updated_at || new Date().toISOString()),
       };
+
+      this.workflows.set(workflowId, workflow);
+
+      // Strictly update only the approved step
+      const currentSteps = this.steps.get(workflowId) || [];
+      const updatedSteps = currentSteps.map((s) => (s.id === stepId ? { ...s, ...step } : s));
+      this.steps.set(workflowId, updatedSteps);
 
       return { success: true, data: { workflow, step } };
     } catch (err: unknown) {
@@ -541,56 +514,87 @@ export class RealWorkflowApiService implements IWorkflowApiService {
     }
   }
 
+  /**
+   * ACTION: Reject Step
+   * Strictly passes explicit IDs and reason to POST ${BASE_URL}/api/workflows/${workflowId}/steps/${stepId}/reject-action
+   */
   async rejectStep(
-    workflowIdOrStepId: string,
-    stepIdOrReason?: string,
-    maybeReason?: string
+    workflowId: string,
+    stepId: string,
+    reason?: string
   ): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep }>> {
-    let workflowId = '';
-    let stepId = '';
-    let reason = '';
+    try {
+      const response = await fetch(`${this.baseUrl}/api/workflows/${workflowId}/steps/${stepId}/reject-action`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${DEMO_USER_UUID}`,
+        },
+        body: JSON.stringify({ reason: reason || 'Operator rejected change' }),
+      });
 
-    if (maybeReason !== undefined || (stepIdOrReason && (stepIdOrReason.startsWith('step-') || stepIdOrReason.length > 20))) {
-      workflowId = workflowIdOrStepId;
-      stepId = stepIdOrReason || '';
-      reason = maybeReason || 'Rejected by user';
-    } else {
-      stepId = workflowIdOrStepId;
-      reason = stepIdOrReason || 'Rejected by user';
-      for (const [wId, stepsList] of this.steps.entries()) {
-        if (stepsList.some((s) => s.id === stepId)) {
-          workflowId = wId;
-          break;
+      let json: unknown = null;
+      let rawText: string = '';
+      try {
+        rawText = await response.text();
+        json = JSON.parse(rawText);
+      } catch {
+        // Empty or non-JSON response
+      }
+
+      if (!response.ok) {
+        const fallbackMsg = `HTTP ${response.status} (${response.statusText || 'Error'}) from reject-action`;
+        let errorMsg = parseErrorMessage(json, '');
+        if (!errorMsg && rawText && !rawText.trim().startsWith('<')) {
+          errorMsg = rawText.trim();
         }
+        return { success: false, error: errorMsg || fallbackMsg };
       }
-      if (!workflowId && this.workflows.size > 0) {
-        workflowId = Array.from(this.workflows.keys())[this.workflows.size - 1];
-      }
+
+      const raw = (json && typeof json === 'object') ? (json as Record<string, unknown>) : {};
+      const data = (raw.data && typeof raw.data === 'object') ? (raw.data as Record<string, unknown>) : raw;
+      const rawStep = (data.step || data) as Record<string, unknown>;
+      const rawWf = (data.workflow || {}) as Record<string, unknown>;
+
+      const existingWf = this.workflows.get(workflowId);
+      const existingStep = (this.steps.get(workflowId) || []).find((s) => s.id === stepId);
+
+      const step: WorkflowStep = {
+        id: String(rawStep.id || stepId),
+        workflow_id: workflowId,
+        tool_id: String(rawStep.tool_id || rawStep.toolId || existingStep?.tool_id || ''),
+        tool_name: String(rawStep.tool_name || rawStep.toolName || existingStep?.tool_name || ''),
+        step_order: Number(rawStep.step_order || rawStep.stepOrder || existingStep?.step_order || 1),
+        arguments: (rawStep.arguments as Record<string, unknown>) || existingStep?.arguments || {},
+        output: (rawStep.output as Record<string, unknown> | string | null) ?? existingStep?.output ?? null,
+        error_message: rawStep.error_message ? String(rawStep.error_message) : (reason || 'Action rejected by user'),
+        status: (String(rawStep.status || rawStep.state || 'ABORTED').toUpperCase() as StepStatus),
+        retry_count: Number(rawStep.retry_count ?? existingStep?.retry_count ?? 0),
+        created_at: String(rawStep.created_at || existingStep?.created_at || new Date().toISOString()),
+      };
+
+      const workflow: Workflow = {
+        ...(existingWf || {}),
+        id: workflowId,
+        user_id: String(rawWf.user_id || existingWf?.user_id || 'user@company.com'),
+        goal: String(rawWf.goal || existingWf?.goal || ''),
+        status: (String(rawWf.status || rawWf.state || 'ABORTED').toUpperCase() as StepStatus),
+        created_at: String(rawWf.created_at || existingWf?.created_at || new Date().toISOString()),
+        updated_at: String(rawWf.updated_at || new Date().toISOString()),
+      };
+
+      this.workflows.set(workflowId, workflow);
+
+      // Strictly update only the rejected step
+      const currentSteps = this.steps.get(workflowId) || [];
+      const updatedSteps = currentSteps.map((s) => (s.id === stepId ? { ...s, ...step } : s));
+      this.steps.set(workflowId, updatedSteps);
+
+      return { success: true, data: { workflow, step } };
+    } catch (err: unknown) {
+      const errorMsg = parseErrorMessage(err, 'Failed to reject step. Backend server may be offline.');
+      return { success: false, error: errorMsg };
     }
-
-    if (!workflowId) workflowId = 'wf-active';
-
-    const step: WorkflowStep = {
-      id: stepId,
-      workflow_id: workflowId,
-      tool_id: 'tool-002',
-      tool_name: 'update_record',
-      step_order: 2,
-      arguments: {},
-      output: null,
-      error_message: reason,
-      status: 'ABORTED',
-      retry_count: 0,
-      created_at: new Date().toISOString(),
-    };
-    const workflow: Workflow = {
-      id: workflowId,
-      user_id: 'user@company.com',
-      goal: '',
-      status: 'ABORTED',
-      created_at: new Date().toISOString(),
-    };
-    return { success: true, data: { workflow, step } };
   }
 
   /**
@@ -1140,8 +1144,8 @@ export const api = apiService;
 
 export const generatePlan = (goal: string) => apiService.createWorkflow({ goal });
 export const submitGoal = (goal: string) => apiService.createWorkflow({ goal });
-export const approveStep = (workflowIdOrStepId: string, stepIdOrApproved?: string | boolean, maybeApproved?: boolean) =>
-  apiService.approveStep(workflowIdOrStepId, stepIdOrApproved, maybeApproved);
-export const rejectStep = (workflowIdOrStepId: string, stepIdOrReason?: string, maybeReason?: string) =>
-  apiService.rejectStep(workflowIdOrStepId, stepIdOrReason, maybeReason);
+export const approveStep = (workflowId: string, stepId: string) =>
+  apiService.approveStep(workflowId, stepId);
+export const rejectStep = (workflowId: string, stepId: string, reason?: string) =>
+  apiService.rejectStep(workflowId, stepId, reason);
 export const retryStep = (workflowId: string, stepId: string) => apiService.retryStep(workflowId, stepId);

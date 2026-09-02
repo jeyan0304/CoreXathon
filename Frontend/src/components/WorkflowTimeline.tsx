@@ -112,8 +112,7 @@ export const WorkflowTimeline: React.FC<WorkflowTimelineProps> = ({
       {steps.map((step) => {
         const isStepAwaitingApproval =
           step.status === 'WAITING_FOR_APPROVAL' ||
-          (workflowStatus === 'WAITING_FOR_APPROVAL' &&
-            (step.requires_approval || step.tool_name === 'update_record' || step.step_order === 2));
+          (workflowStatus === 'WAITING_FOR_APPROVAL' && Boolean(step.requires_approval) && step.status !== 'COMPLETED');
         const isWaitingApproval = isStepAwaitingApproval;
         const isFailed = step.status === 'FAILED';
         const isExpanded = expandedDetails[step.id];
@@ -167,7 +166,7 @@ export const WorkflowTimeline: React.FC<WorkflowTimelineProps> = ({
               {isWaitingApproval && (
                 <div className="mt-4">
                   <ApprovalCard
-                    step={{ ...step, status: 'WAITING_FOR_APPROVAL' }}
+                    step={step}
                     onApprove={onApprove}
                     onReject={onReject}
                     isLoading={isActionLoading}

@@ -146,53 +146,7 @@ function mapAndSyncSteps(
     }
     return normalizedIncoming.sort((a, b) => a.step_order - b.step_order);
   }
-
-  // Fallback: If workflow is COMPLETED and no steps were returned, generate the 3 standard demo steps
-  if (isWorkflowCompleted) {
-    return [
-      {
-        id: `step-${workflowId}-1`,
-        workflow_id: workflowId,
-        tool_id: 'tool-001',
-        tool_name: 'search_information',
-        step_order: 1,
-        arguments: { query: workflow?.goal || '' },
-        output: getDefaultOutputForTool('search_information'),
-        error_message: null,
-        status: 'COMPLETED',
-        retry_count: 0,
-        created_at: now,
-      },
-      {
-        id: `step-${workflowId}-2`,
-        workflow_id: workflowId,
-        tool_id: 'tool-002',
-        tool_name: 'update_record',
-        step_order: 2,
-        arguments: { table: 'projects', change_summary: 'Synchronized status' },
-        output: getDefaultOutputForTool('update_record'),
-        error_message: null,
-        status: 'COMPLETED',
-        retry_count: 0,
-        created_at: now,
-      },
-      {
-        id: `step-${workflowId}-3`,
-        workflow_id: workflowId,
-        tool_id: 'tool-003',
-        tool_name: 'send_notification',
-        step_order: 3,
-        arguments: { message: 'Workflow completed successfully' },
-        output: getDefaultOutputForTool('send_notification'),
-        error_message: null,
-        status: 'COMPLETED',
-        retry_count: 1,
-        created_at: now,
-      },
-    ];
-  }
-
-  return [];
+  return normalizedIncoming;
 }
 
 interface WorkflowExecutionPageProps {
@@ -318,55 +272,33 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
     setErrorMessage(null);
 
     try {
-      // Inline Approve wired directly to apiService.approveStep(stepId, true)
-      const res = await apiService.approveStep(stepId, true);
+      // Strictly pass explicit workflowId and stepId
+      const res = await apiService.approveStep(activeWorkflow.id, stepId);
       if (res.success) {
-        const wf: Workflow = {
-          ...activeWorkflow,
-          ...(res.data.workflow || {}),
-          status: res.data.workflow?.status || 'RUNNING',
-        };
-        setActiveWorkflow(wf);
+        const returnedWf = res.data.workflow;
+        const returnedStep = res.data.step;
 
-        // Update local React state: Step 2 to COMPLETED and Step 3 to RUNNING
-        setSteps((prevSteps) => {
-          const updated = prevSteps.map((s) => {
-            if (s.id === stepId || s.tool_name === 'update_record') {
+        const updatedWf: Workflow = {
+          ...activeWorkflow,
+          ...returnedWf,
+          status: returnedWf?.status || activeWorkflow.status,
+        };
+        setActiveWorkflow(updatedWf);
+
+        // ONLY target that exact stepId without cascading or automatically approving subsequent steps
+        setSteps((prevSteps) =>
+          prevSteps.map((s) => {
+            if (s.id === stepId) {
               return {
                 ...s,
-                status: 'COMPLETED' as StepStatus,
-                output: res.data.step.output || getDefaultOutputForTool('update_record', s.arguments),
-              };
-            }
-            if (s.step_order === 3 || s.tool_name === 'send_notification') {
-              return {
-                ...s,
-                status: 'RUNNING' as StepStatus,
+                ...returnedStep,
+                status: returnedStep.status || 'COMPLETED',
+                output: returnedStep.output !== undefined && returnedStep.output !== null ? returnedStep.output : s.output,
               };
             }
             return s;
-          });
-          return mapAndSyncSteps(updated, currentPlan, wf);
-        });
-
-        // Automatically transition Step 3 to FAILED after 1 second for the recovery demo
-        setTimeout(() => {
-          setSteps((prevSteps) => {
-            const failedWf: Workflow = { ...wf, status: 'FAILED' };
-            const updated = prevSteps.map((s) => {
-              if (s.step_order === 3 || s.tool_name === 'send_notification') {
-                return {
-                  ...s,
-                  status: 'FAILED' as StepStatus,
-                  error_message: 'Temporary connection timeout while trying to send team notification.',
-                };
-              }
-              return s;
-            });
-            return mapAndSyncSteps(updated, currentPlan, failedWf);
-          });
-          setActiveWorkflow((prev) => (prev ? { ...prev, status: 'FAILED' } : null));
-        }, 1000);
+          })
+        );
       } else {
         setErrorMessage(parseErrorMessage(res.error, 'Approval failed'));
       }
@@ -380,9 +312,37 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
   const handleReject = async (stepId: string, reason?: string) => {
     if (!activeWorkflow) return;
     setIsActionLoading(true);
+    setErrorMessage(null);
+
     try {
+      // Strictly pass explicit workflowId, stepId, and reason
       const res = await apiService.rejectStep(activeWorkflow.id, stepId, reason);
-      if (!res.success) {
+      if (res.success) {
+        const returnedWf = res.data.workflow;
+        const returnedStep = res.data.step;
+
+        const updatedWf: Workflow = {
+          ...activeWorkflow,
+          ...returnedWf,
+          status: returnedWf?.status || 'ABORTED',
+        };
+        setActiveWorkflow(updatedWf);
+
+        // ONLY target that exact stepId without cascading
+        setSteps((prevSteps) =>
+          prevSteps.map((s) => {
+            if (s.id === stepId) {
+              return {
+                ...s,
+                ...returnedStep,
+                status: returnedStep.status || 'ABORTED',
+                error_message: returnedStep.error_message || reason || 'Action rejected by human operator.',
+              };
+            }
+            return s;
+          })
+        );
+      } else {
         setErrorMessage(parseErrorMessage(res.error, 'Rejection failed'));
       }
     } catch (err: unknown) {
