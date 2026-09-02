@@ -295,7 +295,12 @@ def testApiUsesStrictEnvelopesAndKebabCaseRoutes(client: TestClient):
         f"/api/workflows/{workflowId}/start-execution", headers=headers
     )
     assert started.status_code == 200
-    assert started.json()["data"]["status"] == "WAITING_FOR_APPROVAL"
+    startedData = started.json()["data"]
+    assert startedData["workflow"]["status"] == "WAITING_FOR_APPROVAL"
+    assert [step["status"] for step in startedData["steps"]] == [
+        "COMPLETED", "WAITING_FOR_APPROVAL", "PENDING"
+    ]
+    assert startedData["steps"][1]["tool_name"] == "update_record"
 
     timeline = client.get(
         f"/api/workflows/{workflowId}/execution-timeline", headers=headers

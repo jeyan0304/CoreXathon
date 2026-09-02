@@ -208,7 +208,17 @@ class WorkflowControlGate:
 
     def getWorkflow(self, userId: UUID, workflowId: Any) -> Dict[str, Any]:
         workflow = self._requireWorkflow(userId, workflowId)
-        return {**workflow, "steps": self.database.listSteps(workflowId)}
+        steps = []
+        for step in self.database.listSteps(workflowId):
+            tool = self.database.getTool(step["tool_id"])
+            steps.append(
+                {
+                    **step,
+                    "tool_name": tool["name"] if tool else None,
+                    "requires_approval": bool(tool and tool["requires_approval"]),
+                }
+            )
+        return {**workflow, "steps": steps}
 
     def storePlan(
         self, userId: UUID, workflowId: Any, proposedSteps: Any

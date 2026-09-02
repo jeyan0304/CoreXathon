@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -145,6 +146,14 @@ def normalizePlannerSteps(plan: Any) -> List[Dict[str, Any]]:
     return normalized
 
 
+def workflowSnapshot(
+    gate: WorkflowControlGate, userId: UUID, workflowId: UUID
+) -> Dict[str, Any]:
+    """Return the single authoritative workflow representation for UI clients."""
+    workflow = gate.getWorkflow(userId, workflowId)
+    return {"workflow": {key: value for key, value in workflow.items() if key != "steps"}, "steps": workflow["steps"]}
+
+
 def getCurrentUserId(
     authorization: Optional[str] = Header(default=None),
     gate: WorkflowControlGate = Depends(getControlGate),
@@ -188,13 +197,14 @@ def createWorkflow(
             "PLANNING_FAILED", "The planner could not generate a workflow plan.", 502
         ) from error
     steps = normalizePlannerSteps(plan)
+    if os.getenv("WORKFLOW_DEMO_FAIL_FIRST_NOTIFICATION") == "true":
+        for step in steps:
+            if step["tool_name"] == "send_notification":
+                step["arguments"]["fail_once"] = True
     gate.validatePlan(steps)
     workflow = gate.createWorkflow(userId, payload.goal)
     persistedSteps = gate.storePlan(userId, workflow["id"], steps)
-    responseSteps = [
-        {**persisted, "tool_name": proposed["tool_name"]}
-        for persisted, proposed in zip(persistedSteps, steps)
-    ]
+    responseSteps = workflowSnapshot(gate, userId, workflow["id"])["steps"]
     return success(
         {
             "workflow": workflow,
@@ -231,7 +241,8 @@ def startExecution(
     userId: UUID = Depends(getCurrentUserId),
     gate: WorkflowControlGate = Depends(getControlGate),
 ) -> JSONResponse:
-    return success(gate.startWorkflow(userId, workflowId))
+    gate.startWorkflow(userId, workflowId)
+    return success(workflowSnapshot(gate, userId, workflowId))
 
 
 @app.get("/api/workflows/{workflowId}/execution-status")
@@ -267,7 +278,8 @@ def approveAction(
     userId: UUID = Depends(getCurrentUserId),
     gate: WorkflowControlGate = Depends(getControlGate),
 ) -> JSONResponse:
-    return success(gate.approveStep(userId, workflowId, stepId))
+    gate.approveStep(userId, workflowId, stepId)
+    return success(workflowSnapshot(gate, userId, workflowId))
 
 
 @app.post("/api/workflows/{workflowId}/steps/{stepId}/reject-action")
@@ -277,7 +289,8 @@ def rejectAction(
     userId: UUID = Depends(getCurrentUserId),
     gate: WorkflowControlGate = Depends(getControlGate),
 ) -> JSONResponse:
-    return success(gate.rejectStep(userId, workflowId, stepId))
+    gate.rejectStep(userId, workflowId, stepId)
+    return success(workflowSnapshot(gate, userId, workflowId))
 
 
 @app.post("/api/workflows/{workflowId}/steps/{stepId}/retry-step")
@@ -287,7 +300,8 @@ def retryStep(
     userId: UUID = Depends(getCurrentUserId),
     gate: WorkflowControlGate = Depends(getControlGate),
 ) -> JSONResponse:
-    return success(gate.retryStep(userId, workflowId, stepId))
+    gate.retryStep(userId, workflowId, stepId)
+    return success(workflowSnapshot(gate, userId, workflowId))
 
 
 @app.post("/api/workflows/{workflowId}/resume-workflow")
