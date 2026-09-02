@@ -30,7 +30,7 @@ import {
 } from './mockData';
 
 export const BASE_URL = 'http://192.168.23.139:3000';
-export const DEMO_USER_UUID = 'demo-user-1234';
+export const DEMO_USER_UUID = '11111111-1111-4111-8111-111111111111';
 
 export interface IWorkflowApiService {
   getTools(): Promise<ApiResponse<Tool[]>>;
@@ -251,6 +251,30 @@ export function mapWorkflowResponse(rawJson: unknown, goalFallback: string): Cre
 }
 
 /**
+ * Execution Trigger API Call
+ * POST ${BASE_URL}/api/workflows/${workflowId}/start-execution
+ */
+export async function startExecution(workflowId: string) {
+  const response = await fetch(`${BASE_URL}/api/workflows/${workflowId}/start-execution`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${DEMO_USER_UUID}`,
+    },
+  });
+  let json: unknown = {};
+  try {
+    json = await response.json();
+  } catch {
+    // Non-JSON or empty body
+  }
+  if (!response.ok) {
+    throw new Error(parseErrorMessage(json, `Failed to start execution for workflow ${workflowId}`));
+  }
+  return json;
+}
+
+/**
  * Real API Service connected to the backend.
  * ONLY 3 explicit endpoints make network calls:
  * - Create Workflow: POST /api/workflows
@@ -348,27 +372,36 @@ export class RealWorkflowApiService implements IWorkflowApiService {
     return this.createWorkflow({ goal });
   }
 
-  // Local execution start without network call
+  /**
+   * ACTION: Start Execution
+   * Strictly makes a POST request to ${BASE_URL}/api/workflows/${workflowId}/start-execution
+   */
   async startExecution(workflowId: string): Promise<ApiResponse<{ workflow: Workflow; steps: WorkflowStep[] }>> {
-    const wf = this.workflows.get(workflowId);
-    const steps = this.steps.get(workflowId) || [];
-    if (wf) {
+    try {
+      const json = await startExecution(workflowId);
+      const rawData = (json && typeof json === 'object' && 'data' in json) ? (json as Record<string, unknown>).data : json;
+      const mapped = mapWorkflowResponse(rawData, '');
+      const steps = mapped.workflow.steps && mapped.workflow.steps.length > 0
+        ? mapped.workflow.steps
+        : (this.steps.get(workflowId) || []);
+
+      const wf = this.workflows.get(workflowId) || mapped.workflow;
       wf.status = 'RUNNING';
       wf.updated_at = new Date().toISOString();
-    }
-    return {
-      success: true,
-      data: {
-        workflow: wf || {
-          id: workflowId,
-          user_id: 'user@company.com',
-          goal: '',
-          status: 'RUNNING',
-          created_at: new Date().toISOString(),
+      this.workflows.set(workflowId, wf);
+      this.steps.set(workflowId, steps);
+
+      return {
+        success: true,
+        data: {
+          workflow: wf,
+          steps,
         },
-        steps,
-      },
-    };
+      };
+    } catch (err: unknown) {
+      const errorMsg = parseErrorMessage(err, `Failed to start execution for workflow ${workflowId}`);
+      return { success: false, error: errorMsg };
+    }
   }
 
   /**
