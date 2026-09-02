@@ -14,12 +14,14 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({
 }) => {
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
     apiService.getAuditLogs(initialWorkflowFilter).then((res) => {
-      if (isMounted && res.success) {
-        setLogs(res.data);
+      if (isMounted) {
+        if (res.success) setLogs(res.data);
+        else setError(res.error);
         setLoading(false);
       }
     });
@@ -34,6 +36,9 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({
       const res = await apiService.getAuditLogs(initialWorkflowFilter);
       if (res.success) {
         setLogs(res.data);
+        setError(null);
+      } else {
+        setError(res.error);
       }
     } finally {
       setLoading(false);
@@ -74,6 +79,7 @@ export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({
       </div>
 
       {/* Audit Log Table */}
+      {error && <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">{error}</p>}
       <AuditLogTable logs={logs} />
     </div>
   );

@@ -7,6 +7,10 @@ tests and local demos; it is never selected when Supabase credentials exist.
 
 from __future__ import annotations
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import copy
 import os
 from datetime import datetime, timezone
@@ -118,8 +122,29 @@ class InMemoryDatabase:
             ),
         ]
         for definition in definitions:
-            if self.getToolByName(definition[0]) is None:
+            existing = self.getToolByName(definition[0])
+            if existing is None:
                 self.createTool(*definition)
+            else:
+                self.updateTool(
+                    existing["id"],
+                    {
+                        "description": definition[1],
+                        "input_schema": definition[2],
+                        "requires_approval": definition[3],
+                    },
+                )
+
+    def updateTool(self, toolId: Any, changes: Dict[str, Any]) -> Dict[str, Any]:
+        allowed = {"description", "input_schema", "requires_approval"}
+        if not changes or not set(changes).issubset(allowed):
+            raise DatabaseError("Invalid tool update.")
+        with self._lock:
+            row = self.tools.get(_uuid(toolId))
+            if row is None:
+                raise DatabaseError("Tool not found.")
+            row.update(self._copy(changes))
+        return self._copy(row)
 
     def listTools(self) -> List[Dict[str, Any]]:
         with self._lock:
@@ -152,6 +177,12 @@ class InMemoryDatabase:
         with self._lock:
             row = self.workflows.get(_uuid(workflowId))
         return self._copy(row)
+
+    def listWorkflows(self, userId: Any) -> List[Dict[str, Any]]:
+        userId = _uuid(userId)
+        with self._lock:
+            rows = [row for row in self.workflows.values() if row["user_id"] == userId]
+        return self._copy(sorted(rows, key=lambda row: row["created_at"], reverse=True))
 
     def updateWorkflow(self, workflowId: Any, changes: Dict[str, Any]) -> Dict[str, Any]:
         allowed = {"status"}
@@ -337,12 +368,11 @@ class SupabaseDatabase:
         return result
 
     def authenticateToken(self, token: str) -> Optional[str]:
-        try:
-            response = self.client.auth.get_user(token)
-            user = getattr(response, "user", None)
-            return str(user.id) if user is not None else None
-        except Exception:
-            return None
+        rows = self._execute(
+            self.client.table("users").select("id").eq("id", token).limit(1)
+        )
+        user = self._one(rows)
+        return str(user["id"]) if user is not None else None
 
     def createTool(self, name: str, description: str, inputSchema: Dict[str, Any], requiresApproval: bool = False, toolId: Optional[UUID] = None) -> Dict[str, Any]:
         row = {"id": _uuid(toolId or uuid4()), "name": name, "description": description, "input_schema": inputSchema, "requires_approval": requiresApproval}
@@ -355,8 +385,28 @@ class SupabaseDatabase:
         helper = InMemoryDatabase()
         helper.seedDemoTools()
         for tool in helper.listTools():
-            if self.getToolByName(tool["name"]) is None:
+            existing = self.getToolByName(tool["name"])
+            if existing is None:
                 self.createTool(tool["name"], tool["description"], tool["input_schema"], tool["requires_approval"])
+            else:
+                self.updateTool(
+                    existing["id"],
+                    {
+                        "description": tool["description"],
+                        "input_schema": tool["input_schema"],
+                        "requires_approval": tool["requires_approval"],
+                    },
+                )
+
+    def updateTool(self, toolId: Any, changes: Dict[str, Any]) -> Dict[str, Any]:
+        result = self._one(
+            self._execute(
+                self.client.table("tools").update(changes).eq("id", _uuid(toolId))
+            )
+        )
+        if result is None:
+            raise DatabaseError("Tool not found.")
+        return result
 
     def listTools(self) -> List[Dict[str, Any]]:
         return self._execute(self.client.table("tools").select("*").order("name"))
@@ -376,6 +426,11 @@ class SupabaseDatabase:
 
     def getWorkflow(self, workflowId: Any) -> Optional[Dict[str, Any]]:
         return self._one(self._execute(self.client.table("workflows").select("*").eq("id", _uuid(workflowId)).limit(1)))
+
+    def listWorkflows(self, userId: Any) -> List[Dict[str, Any]]:
+        return self._execute(
+            self.client.table("workflows").select("*").eq("user_id", _uuid(userId)).order("created_at", desc=True)
+        )
 
     def updateWorkflow(self, workflowId: Any, changes: Dict[str, Any]) -> Dict[str, Any]:
         result = self._one(self._execute(self.client.table("workflows").update(changes).eq("id", _uuid(workflowId))))
@@ -481,7 +536,11 @@ def getDatabase() -> Any:
         return _database
 
     url = os.getenv("SUPABASE_URL")
-    serviceRoleKey = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    serviceRoleKey = (
+        os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        or os.getenv("SUPABASE_KEY")
+        or os.getenv("SUPABASE_ANON_KEY")
+    )
     if url and serviceRoleKey:
         try:
             from supabase import create_client

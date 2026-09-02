@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,8 +20,33 @@ from control_gate import ControlGateError, WorkflowControlGate
 from database import DatabaseError, getDatabase
 
 
+repositoryRoot = Path(__file__).resolve().parent.parent
+if str(repositoryRoot) not in sys.path:
+    sys.path.append(str(repositoryRoot))
+
+from planner import generate_plan
+
+
 logger = logging.getLogger("workflow_backend")
 app = FastAPI(title="AI Workflow Automation Platform", version="1.0.0")
+
+# --- CORS Configuration Added Here ---
+corsOrigins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+    if origin.strip()
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=corsOrigins,
+    allow_origin_regex=r"https://[a-z0-9-]+\.vercel\.app",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# -------------------------------------
+
 _controlGate: Optional[WorkflowControlGate] = None
 
 
@@ -69,7 +98,11 @@ async def handleHttpError(request: Request, error: StarletteHTTPException) -> JS
 
 @app.exception_handler(DatabaseError)
 async def handleDatabaseError(request: Request, error: DatabaseError) -> JSONResponse:
-    logger.error("Database operation failed", extra={"path": request.url.path})
+    logger.error(
+        "Database operation failed",
+        extra={"path": request.url.path},
+        exc_info=error,
+    )
     return failure(503, "DATABASE_ERROR", "The database is temporarily unavailable.")
 
 
@@ -86,6 +119,46 @@ def getControlGate() -> WorkflowControlGate:
         database.seedDemoTools()
         _controlGate = WorkflowControlGate(database)
     return _controlGate
+
+
+def getPlanner():
+    return generate_plan
+
+
+def normalizePlannerSteps(plan: Any) -> List[Dict[str, Any]]:
+    if not isinstance(plan, dict) or not isinstance(plan.get("steps"), list):
+        raise ControlGateError("PLANNING_FAILED", "The planner returned malformed output.", 422)
+
+    normalized = []
+    for step in plan["steps"]:
+        if not isinstance(step, dict):
+            raise ControlGateError("PLANNING_FAILED", "The planner returned malformed output.", 422)
+        toolName = step.get("tool_name") or step.get("tool")
+        arguments = step.get("arguments")
+        if not isinstance(toolName, str) or not isinstance(arguments, dict):
+            raise ControlGateError("PLANNING_FAILED", "The planner returned malformed output.", 422)
+        normalized.append(
+            {
+                "tool_name": toolName,
+                "arguments": {key: value for key, value in arguments.items() if value is not None},
+            }
+        )
+
+    if not normalized:
+        raise ControlGateError(
+            "PLANNING_FAILED",
+            "The planner did not produce executable registered-tool steps.",
+            422,
+        )
+    return normalized
+
+
+def workflowSnapshot(
+    gate: WorkflowControlGate, userId: UUID, workflowId: UUID
+) -> Dict[str, Any]:
+    """Return the single authoritative workflow representation for UI clients."""
+    workflow = gate.getWorkflow(userId, workflowId)
+    return {"workflow": {key: value for key, value in workflow.items() if key != "steps"}, "steps": workflow["steps"]}
 
 
 def getCurrentUserId(
@@ -122,8 +195,31 @@ def createWorkflow(
     payload: CreateWorkflowRequest,
     userId: UUID = Depends(getCurrentUserId),
     gate: WorkflowControlGate = Depends(getControlGate),
+    planner=Depends(getPlanner),
 ) -> JSONResponse:
-    return success(gate.createWorkflow(userId, payload.goal), 201)
+    try:
+        plan = planner(payload.goal)
+    except Exception as error:
+        raise ControlGateError(
+            "PLANNING_FAILED", "The planner could not generate a workflow plan.", 502
+        ) from error
+    steps = normalizePlannerSteps(plan)
+    if os.getenv("WORKFLOW_DEMO_FAIL_FIRST_NOTIFICATION") == "true":
+        for step in steps:
+            if step["tool_name"] == "send_notification":
+                step["arguments"]["fail_once"] = True
+    gate.validatePlan(steps)
+    workflow = gate.createWorkflow(userId, payload.goal)
+    persistedSteps = gate.storePlan(userId, workflow["id"], steps)
+    responseSteps = workflowSnapshot(gate, userId, workflow["id"])["steps"]
+    return success(
+        {
+            "workflow": workflow,
+            "steps": responseSteps,
+            "reasoning": plan.get("reasoning", ""),
+        },
+        201,
+    )
 
 
 @app.get("/api/workflows/{workflowId}")
@@ -132,7 +228,15 @@ def getWorkflow(
     userId: UUID = Depends(getCurrentUserId),
     gate: WorkflowControlGate = Depends(getControlGate),
 ) -> JSONResponse:
-    return success(gate.getWorkflow(userId, workflowId))
+    return success(workflowSnapshot(gate, userId, workflowId))
+
+
+@app.get("/api/workflows")
+def listWorkflows(
+    userId: UUID = Depends(getCurrentUserId),
+    gate: WorkflowControlGate = Depends(getControlGate),
+) -> JSONResponse:
+    return success(gate.listWorkflows(userId))
 
 
 @app.post("/api/workflows/{workflowId}/plans", status_code=201)
@@ -152,7 +256,8 @@ def startExecution(
     userId: UUID = Depends(getCurrentUserId),
     gate: WorkflowControlGate = Depends(getControlGate),
 ) -> JSONResponse:
-    return success(gate.startWorkflow(userId, workflowId))
+    gate.startWorkflow(userId, workflowId)
+    return success(workflowSnapshot(gate, userId, workflowId))
 
 
 @app.get("/api/workflows/{workflowId}/execution-status")
@@ -188,7 +293,8 @@ def approveAction(
     userId: UUID = Depends(getCurrentUserId),
     gate: WorkflowControlGate = Depends(getControlGate),
 ) -> JSONResponse:
-    return success(gate.approveStep(userId, workflowId, stepId))
+    gate.approveStep(userId, workflowId, stepId)
+    return success(workflowSnapshot(gate, userId, workflowId))
 
 
 @app.post("/api/workflows/{workflowId}/steps/{stepId}/reject-action")
@@ -198,7 +304,8 @@ def rejectAction(
     userId: UUID = Depends(getCurrentUserId),
     gate: WorkflowControlGate = Depends(getControlGate),
 ) -> JSONResponse:
-    return success(gate.rejectStep(userId, workflowId, stepId))
+    gate.rejectStep(userId, workflowId, stepId)
+    return success(workflowSnapshot(gate, userId, workflowId))
 
 
 @app.post("/api/workflows/{workflowId}/steps/{stepId}/retry-step")
@@ -208,7 +315,8 @@ def retryStep(
     userId: UUID = Depends(getCurrentUserId),
     gate: WorkflowControlGate = Depends(getControlGate),
 ) -> JSONResponse:
-    return success(gate.retryStep(userId, workflowId, stepId))
+    gate.retryStep(userId, workflowId, stepId)
+    return success(workflowSnapshot(gate, userId, workflowId))
 
 
 @app.post("/api/workflows/{workflowId}/resume-workflow")
