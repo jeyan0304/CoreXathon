@@ -169,24 +169,28 @@ export function mapWorkflowResponse(rawJson: unknown, goalFallback: string): Cre
 
   const workflowId = String(rawWf.id || rawWf._id || rawWf.workflow_id || rawWf.workflowId || `wf-${Date.now().toString(36)}`);
   const goal = String(rawWf.goal || goalFallback);
-  const status = (rawWf.status as StepStatus) || 'PENDING';
+  const rawStatus = String(rawWf.status || rawWf.state || data.status || json.status || '').toUpperCase();
+  const status: StepStatus = (rawStatus as StepStatus) || 'PENDING';
   const userId = String(rawWf.user_id || rawWf.userId || 'user@company.com');
   const createdAt = String(rawWf.created_at || rawWf.createdAt || new Date().toISOString());
   const updatedAt = rawWf.updated_at ? String(rawWf.updated_at) : rawWf.updatedAt ? String(rawWf.updatedAt) : createdAt;
 
-  const steps: WorkflowStep[] = rawSteps.map((s, idx) => ({
-    id: String(s.id || `step-${workflowId}-${idx + 1}`),
-    workflow_id: workflowId,
-    tool_id: String(s.tool_id || s.toolId || `tool-00${idx + 1}`),
-    tool_name: String(s.tool_name || s.toolName || s.name || 'step_action'),
-    step_order: Number(s.step_order ?? s.stepOrder ?? s.order ?? idx + 1),
-    arguments: (s.arguments || s.args || s.payload || {}) as Record<string, unknown>,
-    output: (s.output as Record<string, unknown> | string | null) ?? null,
-    error_message: s.error_message ? String(s.error_message) : (s.error ? String(s.error) : null),
-    status: (s.status as StepStatus) || 'PENDING',
-    retry_count: Number(s.retry_count ?? s.retryCount ?? 0),
-    created_at: s.created_at ? String(s.created_at) : createdAt,
-  }));
+  const steps: WorkflowStep[] = rawSteps.map((s, idx) => {
+    const rawStepStatus = String(s.status || s.state || '').toUpperCase();
+    return {
+      id: String(s.id || `step-${workflowId}-${idx + 1}`),
+      workflow_id: workflowId,
+      tool_id: String(s.tool_id || s.toolId || `tool-00${idx + 1}`),
+      tool_name: String(s.tool_name || s.toolName || s.name || 'step_action'),
+      step_order: Number(s.step_order ?? s.stepOrder ?? s.order ?? idx + 1),
+      arguments: (s.arguments || s.args || s.payload || {}) as Record<string, unknown>,
+      output: (s.output as Record<string, unknown> | string | null) ?? null,
+      error_message: s.error_message ? String(s.error_message) : (s.error ? String(s.error) : null),
+      status: (rawStepStatus as StepStatus) || 'PENDING',
+      retry_count: Number(s.retry_count ?? s.retryCount ?? 0),
+      created_at: s.created_at ? String(s.created_at) : createdAt,
+    };
+  });
 
   let plan: PlannedStepPreview[] = [];
   if (rawPlan.length > 0) {
@@ -381,13 +385,38 @@ export class RealWorkflowApiService implements IWorkflowApiService {
       const json = await startExecution(workflowId);
       const rawData = (json && typeof json === 'object' && 'data' in json) ? (json as Record<string, unknown>).data : json;
       const mapped = mapWorkflowResponse(rawData, '');
-      const steps = mapped.workflow.steps && mapped.workflow.steps.length > 0
-        ? mapped.workflow.steps
-        : (this.steps.get(workflowId) || []);
+      const existingWf = this.workflows.get(workflowId);
+      const existingSteps = this.steps.get(workflowId) || [];
 
-      const wf = this.workflows.get(workflowId) || mapped.workflow;
-      wf.status = 'RUNNING';
-      wf.updated_at = new Date().toISOString();
+      // Update workflow status directly from the start-execution API response payload (DO NOT force 'RUNNING')
+      const wfStatus: StepStatus = mapped.workflow.status || existingWf?.status || 'PENDING';
+
+      const wf: Workflow = {
+        ...(existingWf || {}),
+        ...mapped.workflow,
+        id: workflowId,
+        goal: mapped.workflow.goal || existingWf?.goal || '',
+        status: wfStatus,
+        updated_at: mapped.workflow.updated_at || new Date().toISOString(),
+      };
+
+      // Update step status directly from the start-execution API response payload
+      let steps: WorkflowStep[];
+      if (mapped.workflow.steps && mapped.workflow.steps.length > 0) {
+        if (existingSteps.length > 0 && mapped.workflow.steps.length < existingSteps.length) {
+          steps = existingSteps.map((es) => {
+            const returnedMatch = mapped.workflow.steps?.find(
+              (ms) => ms.id === es.id || ms.step_order === es.step_order || ms.tool_name === es.tool_name
+            );
+            return returnedMatch ? { ...es, ...returnedMatch } : es;
+          });
+        } else {
+          steps = mapped.workflow.steps;
+        }
+      } else {
+        steps = existingSteps;
+      }
+
       this.workflows.set(workflowId, wf);
       this.steps.set(workflowId, steps);
 
