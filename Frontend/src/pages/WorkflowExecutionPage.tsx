@@ -4,6 +4,7 @@ import type {
   Workflow,
   WorkflowStep,
   PlannedStepPreview,
+  StepStatus,
 } from '../types';
 import { apiService, parseErrorMessage } from '../services/api';
 import { PlanPreview } from '../components/PlanPreview';
@@ -17,6 +18,182 @@ import {
   ArrowRight,
   ShieldAlert,
 } from 'lucide-react';
+
+function getDefaultOutputForTool(toolName: string, args?: Record<string, unknown>): Record<string, unknown> {
+  switch (toolName) {
+    case 'search_information':
+      return {
+        records_found: 2,
+        matches: [
+          { id: 'apollo-repo-01', title: 'Sprint 14 Apollo Milestone', status: 'ON_TRACK' },
+          { id: 'apollo-db-09', title: 'Production Apollo Database Instance', health: '98%' },
+        ],
+        source: 'Project Documentation Search',
+      };
+    case 'update_record':
+      return {
+        updated: true,
+        table: (args?.table as string) || 'projects',
+        record_id: (args?.record_id as string) || 'proj_apollo_09',
+        rows_affected: 1,
+        timestamp: new Date().toISOString(),
+        verified_by: 'Safety Checkpoint',
+      };
+    case 'send_notification':
+      return {
+        delivery_status: 'SENT',
+        message_id: 'msg_slack_apollo_9921',
+        recipient: (args?.recipient as string) || '@apollo-leads',
+        delivered_at: new Date().toISOString(),
+      };
+    default:
+      return {
+        status: 'COMPLETED',
+        timestamp: new Date().toISOString(),
+      };
+  }
+}
+
+function mapAndSyncSteps(
+  rawSteps: WorkflowStep[] | undefined,
+  plan: PlannedStepPreview[] | null,
+  workflow: Workflow | null
+): WorkflowStep[] {
+  const isWorkflowCompleted = workflow?.status === 'COMPLETED';
+  const workflowId = workflow?.id || 'wf-active';
+  const now = workflow?.created_at || new Date().toISOString();
+
+  // Normalize incoming steps from backend
+  const normalizedIncoming: WorkflowStep[] = Array.isArray(rawSteps)
+    ? rawSteps.map((s, idx) => {
+        const rawStatus = String(s.status || (isWorkflowCompleted ? 'COMPLETED' : 'PENDING')).toUpperCase();
+        const status: StepStatus = (rawStatus as StepStatus) || (isWorkflowCompleted ? 'COMPLETED' : 'PENDING');
+        const toolName = s.tool_name || (plan && plan[idx]?.tool_name) || `action_${idx + 1}`;
+        const stepOrder = s.step_order || (idx + 1);
+
+        return {
+          id: s.id || `step-${workflowId}-${stepOrder}`,
+          workflow_id: s.workflow_id || workflowId,
+          tool_id: s.tool_id || (toolName === 'search_information' ? 'tool-001' : toolName === 'update_record' ? 'tool-002' : 'tool-003'),
+          tool_name: toolName,
+          step_order: stepOrder,
+          arguments: s.arguments && Object.keys(s.arguments).length > 0
+            ? s.arguments
+            : (plan && plan[idx]?.arguments) || {},
+          output: s.output || (isWorkflowCompleted ? getDefaultOutputForTool(toolName, s.arguments) : null),
+          error_message: s.error_message || null,
+          status: isWorkflowCompleted && status !== 'FAILED' && status !== 'ABORTED' ? 'COMPLETED' : status,
+          retry_count: s.retry_count || 0,
+          created_at: s.created_at || now,
+        };
+      })
+    : [];
+
+  // If a plan exists (e.g., the 3 planned steps for the demo), ensure all steps are represented and mapped
+  if (plan && plan.length > 0) {
+    const merged: WorkflowStep[] = plan.map((p, idx) => {
+      const match = normalizedIncoming.find(
+        (s) => s.step_order === p.step_order || s.tool_name === p.tool_name
+      );
+
+      if (match) {
+        return {
+          ...match,
+          step_order: p.step_order || idx + 1,
+          arguments: match.arguments && Object.keys(match.arguments).length > 0 ? match.arguments : p.arguments,
+          status: isWorkflowCompleted && match.status !== 'FAILED' && match.status !== 'ABORTED'
+            ? 'COMPLETED'
+            : match.status,
+          output: match.output || (isWorkflowCompleted ? getDefaultOutputForTool(p.tool_name, p.arguments) : null),
+        };
+      }
+
+      // If this planned step wasn't in rawSteps yet
+      const stepStatus: StepStatus = isWorkflowCompleted ? 'COMPLETED' : 'PENDING';
+      return {
+        id: `step-${workflowId}-${p.step_order || idx + 1}`,
+        workflow_id: workflowId,
+        tool_id: p.tool_name === 'search_information' ? 'tool-001' : p.tool_name === 'update_record' ? 'tool-002' : 'tool-003',
+        tool_name: p.tool_name,
+        step_order: p.step_order || idx + 1,
+        arguments: p.arguments || {},
+        output: isWorkflowCompleted ? getDefaultOutputForTool(p.tool_name, p.arguments) : null,
+        error_message: null,
+        status: stepStatus,
+        retry_count: 0,
+        created_at: now,
+      };
+    });
+
+    // Append any extra incoming steps that weren't in plan
+    normalizedIncoming.forEach((inc) => {
+      if (!merged.some((m) => m.id === inc.id || m.step_order === inc.step_order)) {
+        merged.push(inc);
+      }
+    });
+
+    return merged.sort((a, b) => a.step_order - b.step_order);
+  }
+
+  // If no plan, return normalized incoming
+  if (normalizedIncoming.length > 0) {
+    if (isWorkflowCompleted) {
+      return normalizedIncoming.map((s) => ({
+        ...s,
+        status: s.status === 'FAILED' || s.status === 'ABORTED' ? s.status : 'COMPLETED',
+        output: s.output || getDefaultOutputForTool(s.tool_name, s.arguments),
+      }));
+    }
+    return normalizedIncoming.sort((a, b) => a.step_order - b.step_order);
+  }
+
+  // Fallback: If workflow is COMPLETED and no steps were returned, generate the 3 standard demo steps
+  if (isWorkflowCompleted) {
+    return [
+      {
+        id: `step-${workflowId}-1`,
+        workflow_id: workflowId,
+        tool_id: 'tool-001',
+        tool_name: 'search_information',
+        step_order: 1,
+        arguments: { query: workflow?.goal || '' },
+        output: getDefaultOutputForTool('search_information'),
+        error_message: null,
+        status: 'COMPLETED',
+        retry_count: 0,
+        created_at: now,
+      },
+      {
+        id: `step-${workflowId}-2`,
+        workflow_id: workflowId,
+        tool_id: 'tool-002',
+        tool_name: 'update_record',
+        step_order: 2,
+        arguments: { table: 'projects', change_summary: 'Synchronized status' },
+        output: getDefaultOutputForTool('update_record'),
+        error_message: null,
+        status: 'COMPLETED',
+        retry_count: 0,
+        created_at: now,
+      },
+      {
+        id: `step-${workflowId}-3`,
+        workflow_id: workflowId,
+        tool_id: 'tool-003',
+        tool_name: 'send_notification',
+        step_order: 3,
+        arguments: { message: 'Workflow completed successfully' },
+        output: getDefaultOutputForTool('send_notification'),
+        error_message: null,
+        status: 'COMPLETED',
+        retry_count: 1,
+        created_at: now,
+      },
+    ];
+  }
+
+  return [];
+}
 
 interface WorkflowExecutionPageProps {
   onNavigateToAudit: (workflowId?: string) => void;
@@ -40,19 +217,21 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
   const workflowId = activeWorkflow?.id;
 
   // Subscribe to realtime workflow updates when activeWorkflow is set
+  // Subscribe to realtime workflow updates when activeWorkflow is set
   useEffect(() => {
     if (!workflowId) return;
 
     const unsubscribe = apiService.subscribeToWorkflow(workflowId, (data) => {
-      setActiveWorkflow({
+      const updatedWf: Workflow = {
         id: data.id,
         user_id: data.user_id,
         goal: data.goal,
         status: data.status,
         created_at: data.created_at,
         updated_at: data.updated_at,
-      });
-      setSteps(data.steps);
+      };
+      setActiveWorkflow(updatedWf);
+      setSteps(mapAndSyncSteps(data.steps, currentPlan, updatedWf));
 
       // Trigger celebratory confetti once when completed
       if (data.status === 'COMPLETED' && !hasTriggeredConfetti) {
@@ -67,7 +246,7 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
     });
 
     return () => unsubscribe();
-  }, [workflowId, hasTriggeredConfetti]);
+  }, [workflowId, hasTriggeredConfetti, currentPlan]);
 
   // Handle plan generation from goal
   const handleGeneratePlan = async (e?: React.FormEvent) => {
@@ -83,7 +262,7 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
       if (res.success) {
         setActiveWorkflow(res.data.workflow);
         setCurrentPlan(res.data.plan);
-        setSteps([]);
+        setSteps(mapAndSyncSteps(res.data.workflow.steps, res.data.plan, res.data.workflow));
       } else {
         setErrorMessage(parseErrorMessage(res.error, 'Error creating plan'));
       }
@@ -103,8 +282,25 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
     try {
       const res = await apiService.startExecution(activeWorkflow.id);
       if (res.success) {
-        setActiveWorkflow(res.data.workflow);
-        setSteps(res.data.steps);
+        const wf = res.data.workflow;
+        setActiveWorkflow(wf);
+        const incomingSteps = (res.data.steps && res.data.steps.length > 0)
+          ? res.data.steps
+          : (wf.steps && wf.steps.length > 0)
+          ? wf.steps
+          : [];
+        const synced = mapAndSyncSteps(incomingSteps, currentPlan, wf);
+        setSteps(synced);
+
+        if (wf.status === 'COMPLETED' && !hasTriggeredConfetti) {
+          setHasTriggeredConfetti(true);
+          confetti({
+            particleCount: 80,
+            spread: 70,
+            origin: { y: 0.6 },
+            colors: ['#2563eb', '#10b981', '#f59e0b', '#6366f1'],
+          });
+        }
       } else {
         setErrorMessage(parseErrorMessage(res.error, 'Error starting tasks'));
       }
@@ -124,49 +320,50 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
     try {
       const res = await apiService.approveStep(activeWorkflow.id, stepId);
       if (res.success) {
+        const wf: Workflow = {
+          ...activeWorkflow,
+          ...(res.data.workflow || {}),
+          status: res.data.workflow?.status || 'RUNNING',
+        };
+        setActiveWorkflow(wf);
+
         // Update local React state: Step 2 to COMPLETED and Step 3 to RUNNING
-        setSteps((prevSteps) =>
-          prevSteps.map((s) => {
+        setSteps((prevSteps) => {
+          const updated = prevSteps.map((s) => {
             if (s.id === stepId || s.tool_name === 'update_record') {
               return {
                 ...s,
-                status: 'COMPLETED',
-                output: res.data.step.output || {
-                  updated_table: s.arguments.table,
-                  record_id: s.arguments.record_id,
-                  rows_affected: 1,
-                  timestamp: new Date().toISOString(),
-                  verified_by: 'Safety Checkpoint',
-                },
+                status: 'COMPLETED' as StepStatus,
+                output: res.data.step.output || getDefaultOutputForTool('update_record', s.arguments),
               };
             }
             if (s.step_order === 3 || s.tool_name === 'send_notification') {
               return {
                 ...s,
-                status: 'RUNNING',
+                status: 'RUNNING' as StepStatus,
               };
             }
             return s;
-          })
-        );
-
-        // Update active workflow status to RUNNING (removes the yellow warning box)
-        setActiveWorkflow((prev) => (prev ? { ...prev, status: 'RUNNING' } : null));
+          });
+          return mapAndSyncSteps(updated, currentPlan, wf);
+        });
 
         // Automatically transition Step 3 to FAILED after 1 second for the recovery demo
         setTimeout(() => {
-          setSteps((prevSteps) =>
-            prevSteps.map((s) => {
+          setSteps((prevSteps) => {
+            const failedWf: Workflow = { ...wf, status: 'FAILED' };
+            const updated = prevSteps.map((s) => {
               if (s.step_order === 3 || s.tool_name === 'send_notification') {
                 return {
                   ...s,
-                  status: 'FAILED',
+                  status: 'FAILED' as StepStatus,
                   error_message: 'Temporary connection timeout while trying to send team notification.',
                 };
               }
               return s;
-            })
-          );
+            });
+            return mapAndSyncSteps(updated, currentPlan, failedWf);
+          });
           setActiveWorkflow((prev) => (prev ? { ...prev, status: 'FAILED' } : null));
         }, 1000);
       } else {
@@ -202,29 +399,30 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
     try {
       const res = await apiService.retryStep(activeWorkflow.id, stepId);
       if (res.success) {
-        // Update local React state for Step 3 from FAILED to COMPLETED
-        setSteps((prevSteps) =>
-          prevSteps.map((s) => {
+        const completedWf: Workflow = {
+          ...activeWorkflow,
+          ...(res.data.workflow || {}),
+          status: 'COMPLETED',
+          updated_at: new Date().toISOString(),
+        };
+        setActiveWorkflow(completedWf);
+
+        // Update local React state for Step 3 from FAILED to COMPLETED and ensure all steps are finished
+        setSteps((prevSteps) => {
+          const updated = prevSteps.map((s) => {
             if (s.id === stepId || s.step_order === 3 || s.tool_name === 'send_notification') {
               return {
                 ...s,
-                status: 'COMPLETED',
+                status: 'COMPLETED' as StepStatus,
                 error_message: null,
-                retry_count: s.retry_count + 1,
-                output: res.data.step.output || {
-                  delivery_status: 'SENT',
-                  message_id: 'msg_slack_apollo_9921',
-                  delivered_at: new Date().toISOString(),
-                  recipient: s.arguments.recipient || '@apollo-leads',
-                },
+                retry_count: (s.retry_count || 0) + 1,
+                output: res.data.step.output || getDefaultOutputForTool('send_notification', s.arguments),
               };
             }
             return s;
-          })
-        );
-
-        // Update workflow status to COMPLETED
-        setActiveWorkflow((prev) => (prev ? { ...prev, status: 'COMPLETED' } : null));
+          });
+          return mapAndSyncSteps(updated, currentPlan, completedWf);
+        });
 
         // Trigger celebratory confetti once completed
         if (!hasTriggeredConfetti) {
@@ -528,7 +726,9 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
                 </p>
               </div>
               <span className="text-xs font-mono font-medium text-slate-500">
-                {steps.filter((s) => s.status === 'COMPLETED').length} / {steps.length} Steps Done
+                {activeWorkflow.status === 'COMPLETED'
+                  ? `${steps.length || currentPlan?.length || 3} / ${steps.length || currentPlan?.length || 3} Steps Done`
+                  : `${steps.filter((s) => s.status === 'COMPLETED').length} / ${steps.length || currentPlan?.length || 3} Steps Done`}
               </span>
             </div>
 
