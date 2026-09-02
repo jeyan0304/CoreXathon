@@ -46,6 +46,7 @@ export interface WorkflowStep {
   error_message?: string | null;
   status: StepStatus;
   retry_count: number;
+  requires_approval?: boolean;
   created_at?: string;
   updated_at?: string;
 }

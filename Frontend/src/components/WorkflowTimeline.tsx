@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import type { WorkflowStep } from '../types';
+import type { WorkflowStep, StepStatus } from '../types';
 import { StatusBadge } from './StatusBadge';
 import { ApprovalCard } from './ApprovalCard';
 import { RecoveryBox } from './RecoveryBox';
@@ -18,6 +18,7 @@ import {
 
 interface WorkflowTimelineProps {
   steps: WorkflowStep[];
+  workflowStatus?: StepStatus;
   onApprove: (stepId: string) => Promise<void> | void;
   onReject: (stepId: string, reason?: string) => Promise<void> | void;
   onRetry: (stepId: string) => Promise<void> | void;
@@ -27,6 +28,7 @@ interface WorkflowTimelineProps {
 
 export const WorkflowTimeline: React.FC<WorkflowTimelineProps> = ({
   steps,
+  workflowStatus,
   onApprove,
   onReject,
   onRetry,
@@ -42,7 +44,14 @@ export const WorkflowTimeline: React.FC<WorkflowTimelineProps> = ({
     }));
   };
 
-  const getStepIndicator = (step: WorkflowStep) => {
+  const getStepIndicator = (step: WorkflowStep, isWaitingApproval: boolean) => {
+    if (isWaitingApproval) {
+      return (
+        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-amber-500 text-white shadow ring-4 ring-amber-100 animate-pulse">
+          <AlertTriangle className="h-5 w-5" />
+        </div>
+      );
+    }
     switch (step.status) {
       case 'COMPLETED':
         return (
@@ -101,7 +110,11 @@ export const WorkflowTimeline: React.FC<WorkflowTimelineProps> = ({
   return (
     <div className="relative pl-6 space-y-8 before:absolute before:left-[19px] before:top-4 before:bottom-4 before:w-[2px] before:bg-slate-200">
       {steps.map((step) => {
-        const isWaitingApproval = step.status === 'WAITING_FOR_APPROVAL';
+        const isStepAwaitingApproval =
+          step.status === 'WAITING_FOR_APPROVAL' ||
+          (workflowStatus === 'WAITING_FOR_APPROVAL' &&
+            (step.requires_approval || step.tool_name === 'update_record' || step.step_order === 2));
+        const isWaitingApproval = isStepAwaitingApproval;
         const isFailed = step.status === 'FAILED';
         const isExpanded = expandedDetails[step.id];
 
@@ -109,7 +122,7 @@ export const WorkflowTimeline: React.FC<WorkflowTimelineProps> = ({
           <div key={step.id} className="relative group">
             {/* Timeline Icon Node */}
             <div className="absolute -left-[35px] top-1 z-10 flex items-center justify-center">
-              {getStepIndicator(step)}
+              {getStepIndicator(step, isWaitingApproval)}
             </div>
 
             {/* Step Card Container */}
@@ -146,7 +159,7 @@ export const WorkflowTimeline: React.FC<WorkflowTimelineProps> = ({
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <StatusBadge status={step.status} />
+                  <StatusBadge status={isWaitingApproval ? 'WAITING_FOR_APPROVAL' : step.status} />
                 </div>
               </div>
 
@@ -154,7 +167,7 @@ export const WorkflowTimeline: React.FC<WorkflowTimelineProps> = ({
               {isWaitingApproval && (
                 <div className="mt-4">
                   <ApprovalCard
-                    step={step}
+                    step={{ ...step, status: 'WAITING_FOR_APPROVAL' }}
                     onApprove={onApprove}
                     onReject={onReject}
                     isLoading={isActionLoading}

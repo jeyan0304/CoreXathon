@@ -318,7 +318,8 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
     setErrorMessage(null);
 
     try {
-      const res = await apiService.approveStep(activeWorkflow.id, stepId);
+      // Inline Approve wired directly to apiService.approveStep(stepId, true)
+      const res = await apiService.approveStep(stepId, true);
       if (res.success) {
         const wf: Workflow = {
           ...activeWorkflow,
@@ -734,6 +735,7 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
 
             <WorkflowTimeline
               steps={steps}
+              workflowStatus={activeWorkflow.status}
               onApprove={handleApproveAction}
               onReject={handleReject}
               onRetry={handleRetryAction}
