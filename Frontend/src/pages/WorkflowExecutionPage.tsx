@@ -17,6 +17,12 @@ import {
   AlertCircle,
   ArrowRight,
   ShieldAlert,
+  ShieldCheck,
+  Search,
+  Bell,
+  PlayCircle,
+  Loader2,
+  Check,
 } from 'lucide-react';
 
 function getDefaultOutputForTool(toolName: string, args?: Record<string, unknown>): Record<string, unknown> {
@@ -153,11 +159,14 @@ interface WorkflowExecutionPageProps {
   onNavigateToAudit: (workflowId?: string) => void;
 }
 
+export const OFFICIAL_BENCHMARK_SCENARIO =
+  'Check the project status, update it if necessary, and notify the team.';
+
 export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
   onNavigateToAudit,
 }) => {
-  // Goal Input state
-  const [goal, setGoal] = useState('Check the project status, update it if necessary, and notify the team.');
+  // Goal Input state pre-populated with official benchmark scenario
+  const [goal, setGoal] = useState(OFFICIAL_BENCHMARK_SCENARIO);
   const [isGeneratingPlan, setIsGeneratingPlan] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -170,7 +179,6 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
 
   const workflowId = activeWorkflow?.id;
 
-  // Subscribe to realtime workflow updates when activeWorkflow is set
   // Subscribe to realtime workflow updates when activeWorkflow is set
   useEffect(() => {
     if (!workflowId) return;
@@ -203,16 +211,20 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
   }, [workflowId, hasTriggeredConfetti, currentPlan]);
 
   // Handle plan generation from goal
-  const handleGeneratePlan = async (e?: React.FormEvent) => {
+  const handleGeneratePlan = async (e?: React.FormEvent, overrideGoal?: string) => {
     if (e) e.preventDefault();
-    if (!goal.trim()) return;
+    const targetGoal = (overrideGoal || goal).trim();
+    if (!targetGoal) return;
+    if (overrideGoal && overrideGoal !== goal) {
+      setGoal(overrideGoal);
+    }
 
     setIsGeneratingPlan(true);
     setErrorMessage(null);
     setHasTriggeredConfetti(false);
 
     try {
-      const res = await apiService.createWorkflow({ goal });
+      const res = await apiService.createWorkflow({ goal: targetGoal });
       if (res.success) {
         setActiveWorkflow(res.data.workflow);
         setCurrentPlan(res.data.plan);
@@ -427,8 +439,8 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
   // Demo presets
   const presets = [
     {
-      title: 'Official Demo Scenario (3 Steps + Human Approval + Retry)',
-      prompt: 'Check the project status, update it if necessary, and notify the team.',
+      title: 'Official 3-Step Benchmark Scenario',
+      prompt: OFFICIAL_BENCHMARK_SCENARIO,
       badge: 'Benchmark',
     },
     {
@@ -496,70 +508,255 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
 
       {/* VIEW 1: Goal Input (When no workflow active or reset) */}
       {!activeWorkflow && (
-        <div className="rounded-2xl border border-slate-200 bg-white p-6 sm:p-8 shadow-xs">
-          <div className="max-w-2xl">
-            <div className="inline-flex items-center gap-1.5 rounded-md bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700 mb-3 border border-blue-100">
-              <Sparkles className="h-3.5 w-3.5" />
-              What do you want done?
+        <div className="space-y-6">
+          {/* Prominent Styled Benchmark Scenario Launcher Box */}
+          <div className="rounded-2xl border-2 border-blue-500/30 bg-gradient-to-br from-blue-50/80 via-white to-indigo-50/40 p-6 sm:p-8 shadow-sm ring-4 ring-blue-50/60 relative overflow-hidden">
+            {/* Background Decorative Gradient Accent */}
+            <div className="absolute -right-12 -top-12 h-40 w-40 rounded-full bg-blue-400/10 blur-2xl pointer-events-none" />
+            <div className="absolute -left-12 -bottom-12 h-40 w-40 rounded-full bg-indigo-400/10 blur-2xl pointer-events-none" />
+
+            <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6 pb-6 border-b border-blue-100">
+              <div className="space-y-1.5 max-w-xl">
+                <div className="inline-flex items-center gap-2 rounded-full bg-blue-600 px-3 py-1 text-xs font-bold text-white shadow-xs">
+                  <Sparkles className="h-3.5 w-3.5 text-blue-200" />
+                  Official 3-Step Benchmark Scenario
+                </div>
+                <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900">
+                  Ready to Test the Safe Execution Pipeline
+                </h2>
+                <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
+                  Pre-configured with a low-risk search action, a high-risk update action that triggers the human approval safety checkpoint, and a final team notification.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap sm:flex-nowrap items-center gap-3 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setGoal(OFFICIAL_BENCHMARK_SCENARIO)}
+                  className="inline-flex items-center gap-2 rounded-xl bg-white border border-slate-300 px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 hover:border-slate-400 transition-all shadow-xs"
+                >
+                  <Check className="h-4 w-4 text-emerald-600" />
+                  Load Scenario Prompt
+                </button>
+                <button
+                  type="button"
+                  disabled={isGeneratingPlan}
+                  onClick={() => handleGeneratePlan(undefined, OFFICIAL_BENCHMARK_SCENARIO)}
+                  className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 px-5 py-2.5 text-xs font-bold text-white shadow-sm transition-all disabled:opacity-50"
+                >
+                  {isGeneratingPlan ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Planning 3 Steps...
+                    </>
+                  ) : (
+                    <>
+                      <PlayCircle className="h-4 w-4" />
+                      Launch 3-Step Benchmark
+                      <ArrowRight className="h-4 w-4" />
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
-            <h2 className="text-2xl font-bold tracking-tight text-slate-900">
-              Tell the AI what to do
-            </h2>
-            <p className="mt-2 text-xs sm:text-sm text-slate-600 leading-relaxed">
-              Type your goal in plain words. The AI Assistant will break it down into clear steps using only pre-approved actions.
-            </p>
+
+            {/* Visual 3-Stage Pipeline Diagram inside the Launcher */}
+            <div className="pt-6">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block mb-3">
+                Benchmark Action Pipeline Sequence:
+              </span>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+                {/* Step 1 Preview Card */}
+                <div className="rounded-xl border border-slate-200 bg-white/90 p-4 shadow-2xs relative">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[11px] font-mono font-bold text-slate-400">STAGE 1</span>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 border border-emerald-200">
+                      <Search className="h-3 w-3" />
+                      Low Risk • Read-Only
+                    </span>
+                  </div>
+                  <h4 className="text-sm font-bold text-slate-900 mb-1 flex items-center gap-1.5">
+                    <span className="font-mono text-xs text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100">
+                      search_information
+                    </span>
+                  </h4>
+                  <p className="text-xs text-slate-500 leading-normal">
+                    Queries project repository and gathers current operational status without altering data.
+                  </p>
+                </div>
+
+                {/* Step 2 Preview Card */}
+                <div className="rounded-xl border-2 border-amber-400/80 bg-amber-50/40 p-4 shadow-2xs relative ring-2 ring-amber-100/60">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[11px] font-mono font-bold text-amber-700">STAGE 2</span>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-900 border border-amber-300">
+                      <ShieldAlert className="h-3 w-3 text-amber-700" />
+                      Human Approval Gate
+                    </span>
+                  </div>
+                  <h4 className="text-sm font-bold text-slate-900 mb-1 flex items-center gap-1.5">
+                    <span className="font-mono text-xs text-amber-800 bg-amber-100/80 px-1.5 py-0.5 rounded border border-amber-200">
+                      update_record
+                    </span>
+                  </h4>
+                  <p className="text-xs text-amber-900/80 leading-normal">
+                    Halts execution and demands explicit operator approval before mutating project data.
+                  </p>
+                </div>
+
+                {/* Step 3 Preview Card */}
+                <div className="rounded-xl border border-slate-200 bg-white/90 p-4 shadow-2xs relative">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[11px] font-mono font-bold text-slate-400">STAGE 3</span>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 border border-emerald-200">
+                      <Bell className="h-3 w-3" />
+                      Low Risk • Dispatch
+                    </span>
+                  </div>
+                  <h4 className="text-sm font-bold text-slate-900 mb-1 flex items-center gap-1.5">
+                    <span className="font-mono text-xs text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100">
+                      send_notification
+                    </span>
+                  </h4>
+                  <p className="text-xs text-slate-500 leading-normal">
+                    Dispatches synchronized status update alert to the designated engineering team.
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
 
-          <form onSubmit={handleGeneratePlan} className="mt-6 space-y-4">
-            <div className="relative">
-              <textarea
-                rows={3}
-                value={goal}
-                onChange={(e) => setGoal(e.target.value)}
-                placeholder="e.g. Check the project status, update it if necessary, and notify the team."
-                className="w-full rounded-xl border border-slate-300 p-4 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100 shadow-inner"
-              />
+          {/* Main Goal Input Card & Editor */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-6 sm:p-8 shadow-xs space-y-6">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">
+                  Custom Goal Input & Prompt Editor
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Refine the benchmark prompt or type any custom task.
+                </p>
+              </div>
+
+              {goal !== OFFICIAL_BENCHMARK_SCENARIO && (
+                <button
+                  type="button"
+                  onClick={() => setGoal(OFFICIAL_BENCHMARK_SCENARIO)}
+                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 px-3 py-1 rounded-lg border border-blue-100 transition-colors"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  Reset to Benchmark
+                </button>
+              )}
             </div>
 
-            {/* Quick Demo Presets */}
-            <div>
-              <span className="text-xs font-semibold text-slate-500 block mb-2">
-                Try an Example:
+            <form onSubmit={(e) => handleGeneratePlan(e)} className="space-y-4">
+              <div className="relative">
+                <textarea
+                  rows={3}
+                  value={goal}
+                  onChange={(e) => setGoal(e.target.value)}
+                  placeholder="e.g. Check the project status, update it if necessary, and notify the team."
+                  className="w-full rounded-xl border border-slate-300 p-4 text-sm text-slate-900 placeholder-slate-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100 shadow-inner font-medium leading-relaxed"
+                />
+              </div>
+
+              {/* Action Bar */}
+              <div className="flex flex-wrap items-center justify-between gap-4 pt-1">
+                <div className="flex items-center gap-2 text-xs text-slate-500">
+                  <ShieldCheck className="h-4 w-4 text-emerald-600" />
+                  <span>Always verifies actions against safety policies before execution.</span>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isGeneratingPlan || !goal.trim()}
+                  className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-7 py-3 text-sm font-bold text-white shadow-sm hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-all disabled:opacity-50"
+                >
+                  {isGeneratingPlan ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Generating 3-Step Plan...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="h-4 w-4" />
+                      Create Plan
+                      <ArrowRight className="h-4 w-4" />
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+
+            {/* Quick Presets Section */}
+            <div className="pt-4 border-t border-slate-100">
+              <span className="text-xs font-semibold text-slate-500 block mb-2.5">
+                Quick Example Presets:
               </span>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {presets.map((p, idx) => (
                   <button
                     key={idx}
                     type="button"
                     onClick={() => setGoal(p.prompt)}
-                    className="flex flex-col text-left rounded-lg border border-slate-200 p-3 hover:border-blue-300 hover:bg-blue-50/40 transition-colors"
+                    className="flex flex-col text-left rounded-xl border border-slate-200 p-3.5 hover:border-blue-300 hover:bg-blue-50/40 transition-all group"
                   >
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs font-semibold text-slate-800">{p.title}</span>
-                      <span className="text-[10px] font-medium bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-xs font-bold text-slate-800 group-hover:text-blue-700 transition-colors">
+                        {p.title}
+                      </span>
+                      <span className="text-[10px] font-medium bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">
                         {p.badge}
                       </span>
                     </div>
-                    <span className="text-xs text-slate-500 line-clamp-2 italic">
+                    <span className="text-xs text-slate-500 italic line-clamp-2">
                       "{p.prompt}"
                     </span>
                   </button>
                 ))}
               </div>
             </div>
+          </div>
 
-            <div className="pt-2 flex items-center justify-end">
-              <button
-                type="submit"
-                disabled={isGeneratingPlan || !goal.trim()}
-                className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-6 py-3 text-sm font-bold text-white shadow-sm hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-all disabled:opacity-50"
-              >
-                <Sparkles className="h-4 w-4" />
-                {isGeneratingPlan ? 'Planning Steps...' : 'Create Plan'}
-                <ArrowRight className="h-4 w-4" />
-              </button>
+          {/* Architectural Safety Highlights Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
+            <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs flex items-start gap-3.5">
+              <div className="h-9 w-9 rounded-lg bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-600 shrink-0">
+                <Search className="h-5 w-5" />
+              </div>
+              <div className="space-y-1">
+                <h4 className="text-xs font-bold text-slate-900">1. Safe Discovery</h4>
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  Low-risk read operations run automatically to inspect records and gather live metrics.
+                </p>
+              </div>
             </div>
-          </form>
+
+            <div className="rounded-xl border border-amber-200 bg-amber-50/30 p-5 shadow-xs flex items-start gap-3.5">
+              <div className="h-9 w-9 rounded-lg bg-amber-100 border border-amber-200 flex items-center justify-center text-amber-700 shrink-0">
+                <ShieldAlert className="h-5 w-5" />
+              </div>
+              <div className="space-y-1">
+                <h4 className="text-xs font-bold text-slate-900">2. Mandatory Human Gate</h4>
+                <p className="text-[11px] text-slate-600 leading-relaxed">
+                  High-risk state changes pause automatically and require explicit human operator sign-off.
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs flex items-start gap-3.5">
+              <div className="h-9 w-9 rounded-lg bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600 shrink-0">
+                <RotateCcw className="h-5 w-5" />
+              </div>
+              <div className="space-y-1">
+                <h4 className="text-xs font-bold text-slate-900">3. Transparent Audit & Retry</h4>
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  Every step is permanently journaled with structured inputs, outputs, and 1-click retry.
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

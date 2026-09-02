@@ -188,6 +188,7 @@ export function mapWorkflowResponse(rawJson: unknown, goalFallback: string): Cre
       error_message: s.error_message ? String(s.error_message) : (s.error ? String(s.error) : null),
       status: (rawStepStatus as StepStatus) || 'PENDING',
       retry_count: Number(s.retry_count ?? s.retryCount ?? 0),
+      requires_approval: Boolean(s.requires_approval ?? s.requiresApproval ?? (s.tool_name === 'update_record')),
       created_at: s.created_at ? String(s.created_at) : createdAt,
     };
   });
@@ -208,16 +209,16 @@ export function mapWorkflowResponse(rawJson: unknown, goalFallback: string): Cre
       tool_name: s.tool_name,
       arguments: s.arguments,
       reasoning: `Execute ${s.tool_name}`,
-      requires_approval: s.tool_name === 'update_record',
-      risk_level: s.tool_name === 'update_record' ? 'HIGH' : 'LOW',
+      requires_approval: Boolean(s.requires_approval ?? (s.tool_name === 'update_record')),
+      risk_level: (s.tool_name === 'update_record' ? 'HIGH' : 'LOW') as ToolRiskLevel,
     }));
   } else {
-    // Fallback 3-step plan preview if steps are not yet materialized
+    // 3-step benchmark plan: low-risk search, high-risk update (human gate), low-risk notification
     plan = [
       {
         step_order: 1,
         tool_name: 'search_information',
-        reasoning: 'Search relevant information and records.',
+        reasoning: 'Search current project status, repository metrics, and latest progress updates.',
         risk_level: 'LOW',
         requires_approval: false,
         arguments: { query: goal },
@@ -225,7 +226,7 @@ export function mapWorkflowResponse(rawJson: unknown, goalFallback: string): Cre
       {
         step_order: 2,
         tool_name: 'update_record',
-        reasoning: 'Update live record with verified findings.',
+        reasoning: 'Update live project record with synchronized status findings.',
         risk_level: 'HIGH',
         requires_approval: true,
         arguments: { table: 'projects', change_summary: 'Synchronized status' },
@@ -233,12 +234,32 @@ export function mapWorkflowResponse(rawJson: unknown, goalFallback: string): Cre
       {
         step_order: 3,
         tool_name: 'send_notification',
-        reasoning: 'Notify designated stakeholders.',
+        reasoning: 'Notify engineering team with updated status report.',
         risk_level: 'LOW',
         requires_approval: false,
-        arguments: { message: 'Status updated successfully' },
+        arguments: { message: 'Project status synchronized successfully' },
       },
     ];
+  }
+
+  // If steps array is empty, materialize the 3 planned steps for execution
+  if (steps.length === 0 && plan.length > 0) {
+    plan.forEach((p) => {
+      steps.push({
+        id: `step-${workflowId}-${p.step_order}`,
+        workflow_id: workflowId,
+        tool_id: p.tool_name === 'search_information' ? 'tool-001' : p.tool_name === 'update_record' ? 'tool-002' : 'tool-003',
+        tool_name: p.tool_name,
+        step_order: p.step_order,
+        arguments: p.arguments,
+        output: null,
+        error_message: null,
+        status: 'PENDING',
+        retry_count: 0,
+        requires_approval: p.requires_approval,
+        created_at: createdAt,
+      });
+    });
   }
 
   const workflow: Workflow = {
