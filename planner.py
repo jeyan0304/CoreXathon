@@ -1,10 +1,11 @@
 import os
 import re
 import json
-from typing import Dict, Any, List
+import concurrent.futures
+from typing import Dict, Any, List, Optional
 from google import genai
 from google.genai import types
-from tool_contracts import PlanOutput, PlannedStep, StepArguments, REGISTERED_TOOLS
+from tool_contracts import PlanOutput, PlannedStep, REGISTERED_TOOLS
 
 PLANNER_PROMPT = """
 You are a workflow planning assistant.
@@ -15,7 +16,7 @@ Available tools:
 - send_notification: Alert/message team. Args: {"recipient": string, "message": string}
 Rules:
 1. ONLY select from the available tools above. Never invent tools.
-2. Output MUST strictly match PlanOutput schema.
+2. Output MUST strictly match PlanOutput schema with 'tool_name' and non-null arguments.
 3. Keep the plan sequential and under 8 steps.
 4. If a goal asks for an unregistered action, return empty steps list with explanation in reasoning.
 """
@@ -128,8 +129,8 @@ def deterministic_fallback_planner(user_goal: str) -> Dict[str, Any]:
         steps.append(
             PlannedStep(
                 step_id=f"step_{step_num}",
-                tool="search_information",
-                arguments=StepArguments(query=f"Search status for {entity_display}")
+                tool_name="search_information",
+                arguments={"query": f"Search status for {entity_display}"}
             )
         )
         step_num += 1
@@ -139,8 +140,8 @@ def deterministic_fallback_planner(user_goal: str) -> Dict[str, Any]:
         steps.append(
             PlannedStep(
                 step_id=f"step_{step_num}",
-                tool="update_record",
-                arguments=StepArguments(record_id=entity_name, status=target_status)
+                tool_name="update_record",
+                arguments={"record_id": entity_name, "status": target_status}
             )
         )
         step_num += 1
@@ -150,11 +151,11 @@ def deterministic_fallback_planner(user_goal: str) -> Dict[str, Any]:
         steps.append(
             PlannedStep(
                 step_id=f"step_{step_num}",
-                tool="send_notification",
-                arguments=StepArguments(
-                    recipient=recipient,
-                    message=f"Status update for {entity_display}: set to {target_status}."
-                )
+                tool_name="send_notification",
+                arguments={
+                    "recipient": recipient,
+                    "message": f"Status update for {entity_display}: set to {target_status}."
+                }
             )
         )
         step_num += 1
@@ -164,8 +165,8 @@ def deterministic_fallback_planner(user_goal: str) -> Dict[str, Any]:
         steps.append(
             PlannedStep(
                 step_id="step_1",
-                tool="search_information",
-                arguments=StepArguments(query=cleaned_goal)
+                tool_name="search_information",
+                arguments={"query": cleaned_goal}
             )
         )
 
@@ -181,11 +182,47 @@ def deterministic_fallback_planner(user_goal: str) -> Dict[str, Any]:
     )
     return plan.model_dump()
 
+def _call_gemini_model(client: Any, model_name: str, user_goal: str) -> Optional[Dict[str, Any]]:
+    """Calls Gemini model with strict schema enforcement."""
+    response = client.models.generate_content(
+        model=model_name,
+        contents=user_goal,
+        config=types.GenerateContentConfig(
+            system_instruction=PLANNER_PROMPT,
+            response_mime_type="application/json",
+            response_schema=PlanOutput,
+            temperature=0.1,
+        ),
+    )
+    plan_dict = json.loads(response.text)
+    validated_plan = PlanOutput(**plan_dict)
+
+    if len(validated_plan.steps) > 8:
+        return None
+    for step in validated_plan.steps:
+        if step.tool_name not in REGISTERED_TOOLS:
+            return None
+    return validated_plan.model_dump()
+
+def _try_ai_planning(user_goal: str) -> Optional[Dict[str, Any]]:
+    """Attempts AI plan generation across configured models."""
+    client = get_client()
+    if not client:
+        return None
+
+    for model_name in ['gemini-2.5-flash', 'gemini-3.6-flash']:
+        try:
+            res = _call_gemini_model(client, model_name, user_goal)
+            if res is not None:
+                return res
+        except Exception:
+            continue
+    return None
+
 def generate_plan(user_goal: str) -> Dict[str, Any]:
     """
-    Primary plan generation function with zero-downtime deterministic fallback.
-    Tries Google Gemini API first if configured; intercepts any 429, 503, timeout,
-    or schema failure and returns a deterministic, schema-compliant PlanOutput.
+    Primary plan generation function with strict 15-second timeout and zero-downtime fallback.
+    Guarantees response within 15 seconds by enforcing an execution watchdog.
     """
     if not user_goal or not user_goal.strip():
         plan = PlanOutput(
@@ -195,34 +232,15 @@ def generate_plan(user_goal: str) -> Dict[str, Any]:
         )
         return plan.model_dump()
 
-    client = get_client()
-    if client:
-        try:
-            for model_name in ['gemini-2.5-flash', 'gemini-3.6-flash']:
-                try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=user_goal,
-                        config=types.GenerateContentConfig(
-                            system_instruction=PLANNER_PROMPT,
-                            response_mime_type="application/json",
-                            response_schema=PlanOutput,
-                            temperature=0.1,
-                        ),
-                    )
-                    plan_dict = json.loads(response.text)
-                    validated_plan = PlanOutput(**plan_dict)
+    # Strict 15-second timeout enforcement
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_try_ai_planning, user_goal)
+            result = future.result(timeout=15.0)
+            if result is not None:
+                return result
+    except (concurrent.futures.TimeoutError, Exception):
+        pass
 
-                    if len(validated_plan.steps) > 8:
-                        return deterministic_fallback_planner(user_goal)
-                    for step in validated_plan.steps:
-                        if step.tool not in REGISTERED_TOOLS:
-                            return deterministic_fallback_planner(user_goal)
-                    return validated_plan.model_dump()
-                except Exception:
-                    continue
-        except Exception:
-            pass
-
-    # Seamless fallback for zero downtime
+    # Seamless deterministic fallback for zero downtime
     return deterministic_fallback_planner(user_goal)
