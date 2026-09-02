@@ -430,14 +430,20 @@ class WorkflowControlGate:
         )
         return self._continueWorkflow(workflow["id"], actor)
 
-    def rejectStep(self, userId: UUID, workflowId: Any, stepId: Any) -> Dict[str, Any]:
+    def rejectStep(
+        self, userId: UUID, workflowId: Any, stepId: Any, reason: Optional[str] = None
+    ) -> Dict[str, Any]:
         workflow = self._requireWorkflow(userId, workflowId)
         step = self._requireStep(workflowId, stepId)
         if workflow["status"] != WorkflowStatus.WAITING_FOR_APPROVAL.value or step["status"] != WorkflowStatus.WAITING_FOR_APPROVAL.value:
             raise ControlGateError("APPROVAL_NOT_PENDING", "This step is not awaiting approval.", 409)
         actor = self._actor(userId)
         self.database.appendAuditLog(
-            workflowId, stepId, actor, "APPROVAL_REJECTED", {"rejected_by": str(userId)}
+            workflowId,
+            stepId,
+            actor,
+            "APPROVAL_REJECTED",
+            {"rejected_by": str(userId), "reason": reason or "Approval was rejected."},
         )
         self._abortIncompleteSteps(workflowId, actor, "Approval was rejected.")
         return self._transitionWorkflow(
@@ -506,3 +512,7 @@ class WorkflowControlGate:
 
     def getAuditLogs(self, userId: UUID, workflowId: Any) -> List[Dict[str, Any]]:
         return self.getTimeline(userId, workflowId)
+
+    def listAllAuditLogs(self, userId: UUID) -> List[Dict[str, Any]]:
+        """Return audit events only for workflows owned by the caller."""
+        return self.database.listAllAuditLogs(userId)

@@ -66,6 +66,11 @@ class StorePlanRequest(BaseModel):
     steps: List[PlanStepRequest] = Field(min_length=1, max_length=10)
 
 
+class RejectStepRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: Optional[str] = Field(default=None, max_length=1000)
+
+
 def success(data: Any, statusCode: int = 200) -> JSONResponse:
     return JSONResponse(status_code=statusCode, content={"success": True, "data": data})
 
@@ -165,24 +170,22 @@ def getCurrentUserId(
     authorization: Optional[str] = Header(default=None),
     gate: WorkflowControlGate = Depends(getControlGate),
 ) -> UUID:
-    """Demo authentication boundary.
-
-    The bearer value is a user UUID. In deployment this dependency should be
-    replaced with Supabase JWT verification; ownership is still rechecked by
-    the control gate on every workflow operation.
-    """
+    """Authenticate a Supabase bearer token and return its verified user ID."""
     if not authorization or not authorization.startswith("Bearer "):
         raise ControlGateError(
-            "UNAUTHORIZED", "A valid bearer user ID is required.", 401
+            "UNAUTHORIZED", "A valid bearer access token is required.", 401
         )
     token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        raise ControlGateError(
+            "UNAUTHORIZED", "A valid bearer access token is required.", 401
+        )
     try:
-        UUID(token)
+        return gate.authenticateToken(token)
     except (ValueError, AttributeError) as error:
         raise ControlGateError(
-            "UNAUTHORIZED", "A valid bearer user ID is required.", 401
+            "UNAUTHORIZED", "A valid bearer access token is required.", 401
         ) from error
-    return gate.authenticateToken(token)
 
 
 @app.get("/health")
@@ -301,10 +304,11 @@ def approveAction(
 def rejectAction(
     workflowId: UUID,
     stepId: UUID,
+    payload: Optional[RejectStepRequest] = None,
     userId: UUID = Depends(getCurrentUserId),
     gate: WorkflowControlGate = Depends(getControlGate),
 ) -> JSONResponse:
-    gate.rejectStep(userId, workflowId, stepId)
+    gate.rejectStep(userId, workflowId, stepId, payload.reason if payload else None)
     return success(workflowSnapshot(gate, userId, workflowId))
 
 
@@ -352,14 +356,6 @@ def getAuditLogs(
     gate: WorkflowControlGate = Depends(getControlGate),
 ) -> JSONResponse:
     return success(gate.getAuditLogs(userId, workflowId))
-
-
-@app.get("/api/workflows")
-def listWorkflows(
-    userId: UUID = Depends(getCurrentUserId),
-    gate: WorkflowControlGate = Depends(getControlGate),
-) -> JSONResponse:
-    return success(gate.listWorkflows(userId))
 
 
 @app.get("/api/audit-logs")

@@ -178,12 +178,6 @@ class InMemoryDatabase:
             row = self.workflows.get(_uuid(workflowId))
         return self._copy(row)
 
-    def listWorkflows(self, userId: Any) -> List[Dict[str, Any]]:
-        userId = _uuid(userId)
-        with self._lock:
-            rows = [row for row in self.workflows.values() if row["user_id"] == userId]
-        return self._copy(sorted(rows, key=lambda row: row["created_at"], reverse=True))
-
     def updateWorkflow(self, workflowId: Any, changes: Dict[str, Any]) -> Dict[str, Any]:
         allowed = {"status"}
         if not changes or not set(changes).issubset(allowed):
@@ -368,11 +362,16 @@ class SupabaseDatabase:
         return result
 
     def authenticateToken(self, token: str) -> Optional[str]:
-        rows = self._execute(
-            self.client.table("users").select("id").eq("id", token).limit(1)
-        )
-        user = self._one(rows)
-        return str(user["id"]) if user is not None else None
+        """Validate an end-user Supabase access token, never a caller-supplied ID."""
+        try:
+            response = self.client.auth.get_user(token)
+            user = getattr(response, "user", None) or getattr(response, "data", None)
+            if user is not None and hasattr(user, "user"):
+                user = user.user
+            userId = getattr(user, "id", None)
+            return str(userId) if userId else None
+        except Exception:
+            return None
 
     def createTool(self, name: str, description: str, inputSchema: Dict[str, Any], requiresApproval: bool = False, toolId: Optional[UUID] = None) -> Dict[str, Any]:
         row = {"id": _uuid(toolId or uuid4()), "name": name, "description": description, "input_schema": inputSchema, "requires_approval": requiresApproval}
@@ -426,11 +425,6 @@ class SupabaseDatabase:
 
     def getWorkflow(self, workflowId: Any) -> Optional[Dict[str, Any]]:
         return self._one(self._execute(self.client.table("workflows").select("*").eq("id", _uuid(workflowId)).limit(1)))
-
-    def listWorkflows(self, userId: Any) -> List[Dict[str, Any]]:
-        return self._execute(
-            self.client.table("workflows").select("*").eq("user_id", _uuid(userId)).order("created_at", desc=True)
-        )
 
     def updateWorkflow(self, workflowId: Any, changes: Dict[str, Any]) -> Dict[str, Any]:
         result = self._one(self._execute(self.client.table("workflows").update(changes).eq("id", _uuid(workflowId))))
@@ -530,7 +524,6 @@ def getDatabase() -> Any:
     serviceRoleKey = (
         os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         or os.getenv("SUPABASE_KEY")
-        or os.getenv("SUPABASE_ANON_KEY")
     )
     if url and serviceRoleKey:
         try:

@@ -375,7 +375,7 @@ def testApiRejectsMissingAuthenticationWithErrorEnvelope(client: TestClient):
         "success": False,
         "error": {
             "code": "UNAUTHORIZED",
-            "message": "A valid bearer user ID is required.",
+            "message": "A valid bearer access token is required.",
         },
     }
 
@@ -389,37 +389,67 @@ def testApiRejectsUnknownBearerIdentity(client: TestClient):
     assert response.json()["error"]["code"] == "UNAUTHORIZED"
 
 
+def testApiAcceptsValidatedJwtRatherThanRequiringUuidBearer():
+    class JwtInMemoryDatabase(InMemoryDatabase):
+        def authenticateToken(self, token: str):
+            return str(USER_ID) if token == "valid.jwt.access-token" else None
+
+    database = JwtInMemoryDatabase()
+    database.createUser(USER_ID, "owner@example.com")
+    database.seedDemoTools()
+    app.dependency_overrides[getControlGate] = lambda: WorkflowControlGate(database)
+    try:
+        with TestClient(app, raise_server_exceptions=False) as testClient:
+            response = testClient.get(
+                "/api/tools", headers={"Authorization": "Bearer valid.jwt.access-token"}
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+
+
 def testSupabaseDemoAuthenticationChecksPersistedUsersTable():
-    class Query:
-        def __init__(self):
-            self.filters = {}
-
-        def select(self, columns):
-            return self
-
-        def eq(self, column, value):
-            self.filters[column] = value
-            return self
-
-        def limit(self, count):
-            return self
-
-        def execute(self):
+    class Auth:
+        def get_user(self, token):
             from types import SimpleNamespace
 
-            if self.filters.get("id") == str(USER_ID):
-                return SimpleNamespace(data=[{"id": str(USER_ID)}])
-            return SimpleNamespace(data=[])
+            if token == "valid-access-token":
+                return SimpleNamespace(user=SimpleNamespace(id=str(USER_ID)))
+            raise ValueError("invalid token")
 
     class Client:
-        def table(self, name):
-            assert name == "users"
-            return Query()
+        auth = Auth()
 
     database = SupabaseDatabase(Client())
 
-    assert database.authenticateToken(str(USER_ID)) == str(USER_ID)
-    assert database.authenticateToken(str(uuid4())) is None
+    assert database.authenticateToken("valid-access-token") == str(USER_ID)
+    assert database.authenticateToken(str(USER_ID)) is None
+
+
+def testRejectReasonAndAllAuditLogsUseOwnedWorkflowScope(client: TestClient):
+    headers = {"Authorization": f"Bearer {USER_ID}"}
+    created = client.post("/api/workflows", headers=headers, json={"goal": "check and update"})
+    workflowId = created.json()["data"]["workflow"]["id"]
+    started = client.post(f"/api/workflows/{workflowId}/start-execution", headers=headers)
+    pendingStep = next(
+        step for step in started.json()["data"]["steps"]
+        if step["status"] == "WAITING_FOR_APPROVAL"
+    )
+
+    rejected = client.post(
+        f"/api/workflows/{workflowId}/steps/{pendingStep['id']}/reject-action",
+        headers=headers,
+        json={"reason": "Needs a change ticket."},
+    )
+    assert rejected.status_code == 200
+    assert rejected.json()["data"]["workflow"]["status"] == "ABORTED"
+
+    audit = client.get("/api/audit-logs", headers=headers)
+    assert audit.status_code == 200
+    rejection = next(event for event in audit.json()["data"] if event["action"] == "APPROVAL_REJECTED")
+    assert rejection["details"]["reason"] == "Needs a change ticket."
 
 
 def testDemoToolSeedingRepairsStaleApprovalMetadata():

@@ -1,7 +1,7 @@
 import type { Tool, Workflow, WorkflowStep, AuditLog, ApiResponse, CreateWorkflowRequest, CreateWorkflowResponse, PlannedStepPreview, StepStatus, ToolRiskLevel } from '../types';
+import { clearSession, getAccessToken } from './auth';
 
 export const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000';
-export const DEMO_USER_UUID = '11111111-1111-4111-8111-111111111111';
 type Snapshot = { workflow: Workflow; steps: WorkflowStep[] };
 
 export interface IWorkflowApiService {
@@ -37,10 +37,15 @@ export function mapWorkflowResponse(payload: unknown, goalFallback: string): Cre
 
 export class RealWorkflowApiService implements IWorkflowApiService {
   private baseUrl: string;
-  constructor(baseUrl = BASE_URL) { this.baseUrl = baseUrl; }
+  private accessTokenProvider: () => string | null;
+  constructor(baseUrl = BASE_URL, accessTokenProvider = getAccessToken) { this.baseUrl = baseUrl; this.accessTokenProvider = accessTokenProvider; }
   private async request(path: string, method = 'GET', body?: unknown): Promise<unknown> {
-    const response = await fetch(`${this.baseUrl}${path}`, { method, headers: { Authorization: `Bearer ${DEMO_USER_UUID}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, body: body === undefined ? undefined : JSON.stringify(body) });
-    const payload: unknown = await response.json().catch(() => null); if (!response.ok) throw new Error(parseErrorMessage(payload, `HTTP ${response.status} from ${path}`)); return payload;
+    const accessToken = this.accessTokenProvider();
+    if (!accessToken) throw new Error('Sign in is required before using the workflow API.');
+    const response = await fetch(`${this.baseUrl}${path}`, { method, headers: { Authorization: `Bearer ${accessToken}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, body: body === undefined ? undefined : JSON.stringify(body) });
+    const payload: unknown = await response.json().catch(() => null);
+    if (response.status === 401) clearSession();
+    if (!response.ok) throw new Error(parseErrorMessage(payload, `HTTP ${response.status} from ${path}`)); return payload;
   }
   private async snapshot(path: string, method = 'GET', body?: unknown): Promise<ApiResponse<Snapshot>> { try { return { success: true, data: mapSnapshot(await this.request(path, method, body)) }; } catch (error) { return { success: false, error: parseErrorMessage(error) }; } }
   async getTools(): Promise<ApiResponse<Tool[]>> { try { const payload = record(await this.request('/api/tools'), 'tools'); const rows = record(payload.data, 'tools data'); if (!Array.isArray(rows)) throw new Error('Invalid tools response from backend.'); return { success: true, data: rows.map((tool) => { const item = record(tool, 'tool'); return { ...item, risk_level: item.requires_approval ? 'HIGH' : 'LOW', status: 'ACTIVE' } as Tool; }) }; } catch (error) { return { success: false, error: parseErrorMessage(error) }; } }
@@ -48,9 +53,9 @@ export class RealWorkflowApiService implements IWorkflowApiService {
   async getWorkflow(id: string): Promise<ApiResponse<Workflow & { steps: WorkflowStep[] }>> { const result = await this.snapshot(`/api/workflows/${id}`); return result.success ? { success: true, data: { ...result.data.workflow, steps: result.data.steps } } : result; }
   async createWorkflow(request: CreateWorkflowRequest): Promise<ApiResponse<CreateWorkflowResponse>> { try { return { success: true, data: mapWorkflowResponse(await this.request('/api/workflows', 'POST', { goal: request.goal }), request.goal) }; } catch (error) { return { success: false, error: parseErrorMessage(error) }; } }
   async generatePlan(goal: string) { return this.createWorkflow({ goal }); } async submitGoal(goal: string) { return this.createWorkflow({ goal }); }
-  async startExecution(workflowId: string) { return this.snapshot(`/api/workflows/${workflowId}/start-execution`, 'POST'); } async approveStep(workflowId: string, stepId: string) { return this.snapshot(`/api/workflows/${workflowId}/steps/${stepId}/approve-action`, 'POST'); } async rejectStep(workflowId: string, stepId: string, _reason?: string) { return this.snapshot(`/api/workflows/${workflowId}/steps/${stepId}/reject-action`, 'POST'); } async retryStep(workflowId: string, stepId: string) { return this.snapshot(`/api/workflows/${workflowId}/steps/${stepId}/retry-step`, 'POST'); }
+  async startExecution(workflowId: string) { return this.snapshot(`/api/workflows/${workflowId}/start-execution`, 'POST'); } async approveStep(workflowId: string, stepId: string) { return this.snapshot(`/api/workflows/${workflowId}/steps/${stepId}/approve-action`, 'POST'); } async rejectStep(workflowId: string, stepId: string, reason?: string) { return this.snapshot(`/api/workflows/${workflowId}/steps/${stepId}/reject-action`, 'POST', reason ? { reason } : undefined); } async retryStep(workflowId: string, stepId: string) { return this.snapshot(`/api/workflows/${workflowId}/steps/${stepId}/retry-step`, 'POST'); }
   async abortWorkflow(workflowId: string): Promise<ApiResponse<{ workflow: Workflow }>> { const result = await this.snapshot(`/api/workflows/${workflowId}/abort-workflow`, 'POST'); return result.success ? { success: true, data: { workflow: result.data.workflow } } : result; }
-  async getAuditLogs(workflowId?: string): Promise<ApiResponse<AuditLog[]>> { if (!workflowId) return { success: false, error: 'Select a workflow to view its audit history.' }; try { const payload = record(await this.request(`/api/workflows/${workflowId}/audit-logs`), 'audit logs'); const rows = record(payload.data, 'audit log data'); if (!Array.isArray(rows)) throw new Error('Invalid audit logs response from backend.'); return { success: true, data: rows as AuditLog[] }; } catch (error) { return { success: false, error: parseErrorMessage(error) }; } }
+  async getAuditLogs(workflowId?: string): Promise<ApiResponse<AuditLog[]>> { try { const path = workflowId ? `/api/workflows/${workflowId}/audit-logs` : '/api/audit-logs'; const payload = record(await this.request(path), 'audit logs'); const rows = record(payload.data, 'audit log data'); if (!Array.isArray(rows)) throw new Error('Invalid audit logs response from backend.'); return { success: true, data: rows as AuditLog[] }; } catch (error) { return { success: false, error: parseErrorMessage(error) }; } }
   subscribeToWorkflow(workflowId: string, onUpdate: (workflow: Workflow & { steps: WorkflowStep[] }) => void): () => void { const timer = window.setInterval(async () => { const result = await this.getWorkflow(workflowId); if (result.success) onUpdate(result.data); }, 2000); return () => window.clearInterval(timer); }
 }
 export const apiService = new RealWorkflowApiService();

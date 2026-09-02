@@ -6,14 +6,24 @@ import { WorkflowExecutionPage } from './pages/WorkflowExecutionPage';
 import { ToolRegistryPage } from './pages/ToolRegistryPage';
 import { AuditTrailPage } from './pages/AuditTrailPage';
 import { apiService } from './services/api';
+import { getAccessToken, signOut } from './services/auth';
+import { SignInPage } from './components/SignInPage';
 
 export function App() {
+  const [authenticated, setAuthenticated] = useState(() => Boolean(getAccessToken()));
   const [activeTab, setActiveTab] = useState<ActiveTab>('workflow');
   const [auditFilter, setAuditFilter] = useState<string | undefined>(undefined);
   const [pendingApprovalsCount, setPendingApprovalsCount] = useState<number>(0);
 
+  useEffect(() => {
+    const handleUnauthorized = () => setAuthenticated(false);
+    window.addEventListener('corexathon:unauthorized', handleUnauthorized);
+    return () => window.removeEventListener('corexathon:unauthorized', handleUnauthorized);
+  }, []);
+
   // Poll or check for pending approvals to badge the nav
   useEffect(() => {
+    if (!authenticated) return;
     const checkApprovals = async () => {
       const res = await apiService.getWorkflows();
       if (res.success) {
@@ -25,7 +35,11 @@ export function App() {
     checkApprovals();
     const interval = setInterval(checkApprovals, 2000);
     return () => clearInterval(interval);
-  }, []);
+  }, [authenticated]);
+
+  if (!authenticated) {
+    return <SignInPage onSignedIn={() => setAuthenticated(true)} />;
+  }
 
   const handleNavigateToAudit = (workflowId?: string) => {
     setAuditFilter(workflowId);
@@ -72,6 +86,7 @@ export function App() {
           <span className="text-slate-400">
             Safe • Transparent • Recoverable
           </span>
+          <button type="button" className="text-slate-500 hover:text-slate-800" onClick={() => void signOut()}>Sign out</button>
         </div>
       </footer>
     </div>

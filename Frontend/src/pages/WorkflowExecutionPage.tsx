@@ -213,8 +213,16 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
 
   const handleAbort = async (wId: string) => {
     setIsActionLoading(true);
+    setErrorMessage(null);
     try {
-      await apiService.abortWorkflow(wId);
+      const res = await apiService.abortWorkflow(wId);
+      if (res.success) {
+        setActiveWorkflow(res.data.workflow);
+        const latest = await apiService.getWorkflow(wId);
+        if (latest.success) setSteps(latest.data.steps);
+      } else {
+        setErrorMessage(parseErrorMessage(res.error, 'Cancel failed'));
+      }
     } catch (err: unknown) {
       setErrorMessage(parseErrorMessage(err, 'Cancel failed'));
     } finally {
