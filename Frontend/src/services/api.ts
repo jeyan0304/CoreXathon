@@ -28,17 +28,86 @@ export function parseErrorMessage(error: unknown, fallback = 'An unexpected erro
 }
 function record(value: unknown, label: string): Record<string, unknown> { if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Invalid ${label} response from backend.`); return value as Record<string, unknown>; }
 function mapStep(raw: unknown): WorkflowStep {
-  const step = record(raw, 'step');
-  if (typeof step.id !== 'string' || typeof step.workflow_id !== 'string' || typeof step.tool_id !== 'string' || typeof step.tool_name !== 'string' || typeof step.status !== 'string') throw new Error('Backend returned an incomplete workflow step.');
-  return { id: step.id, workflow_id: step.workflow_id, tool_id: step.tool_id, tool_name: step.tool_name, step_order: Number(step.step_order), arguments: record(step.arguments, 'step arguments'), output: (step.output as WorkflowStep['output']) ?? null, error_message: typeof step.error_message === 'string' ? step.error_message : null, status: step.status as StepStatus, retry_count: Number(step.retry_count ?? 0), requires_approval: Boolean(step.requires_approval), created_at: typeof step.created_at === 'string' ? step.created_at : undefined };
+  const step = (raw && typeof raw === 'object') ? raw as Record<string, unknown> : {};
+  const id = String(step.id || `step-${Math.random().toString(36).substring(2, 8)}`);
+  const workflowId = String(step.workflow_id || step.workflowId || '');
+  const toolName = String(step.tool_name || step.toolName || 'action');
+  const toolId = String(step.tool_id || step.toolId || `tool-${toolName}`);
+  const status = (String(step.status || 'PENDING').toUpperCase()) as StepStatus;
+  const requiresApproval = Boolean(step.requires_approval ?? (toolName === 'update_record'));
+  const stepOrder = Number(step.step_order ?? step.stepOrder ?? 1);
+  const args = (step.arguments && typeof step.arguments === 'object') ? step.arguments as Record<string, unknown> : {};
+  const output = (step.output as WorkflowStep['output']) ?? null;
+  const errorMessage = typeof step.error_message === 'string' ? step.error_message : typeof step.error === 'string' ? step.error : null;
+  const retryCount = Number(step.retry_count ?? step.retryCount ?? 0);
+  const createdAt = typeof step.created_at === 'string' ? step.created_at : undefined;
+
+  return {
+    id,
+    workflow_id: workflowId,
+    tool_id: toolId,
+    tool_name: toolName,
+    step_order: stepOrder,
+    arguments: args,
+    output,
+    error_message: errorMessage,
+    status,
+    retry_count: retryCount,
+    requires_approval: requiresApproval,
+    created_at: createdAt,
+  };
 }
+
 function mapSnapshot(payload: unknown, goalFallback = ''): Snapshot {
-  const data = record(payload, 'API'); const container = data.data === undefined ? data : record(data.data, 'API data'); const rawWorkflow = record(container.workflow, 'workflow');
-  if (typeof rawWorkflow.id !== 'string' || typeof rawWorkflow.user_id !== 'string' || typeof rawWorkflow.goal !== 'string' || typeof rawWorkflow.status !== 'string' || typeof rawWorkflow.created_at !== 'string' || !Array.isArray(container.steps)) throw new Error('Backend returned an incomplete workflow snapshot.');
-  const steps = container.steps.map(mapStep);
-  return { workflow: { id: rawWorkflow.id, user_id: rawWorkflow.user_id, goal: rawWorkflow.goal || goalFallback, status: rawWorkflow.status as StepStatus, created_at: rawWorkflow.created_at, updated_at: typeof rawWorkflow.updated_at === 'string' ? rawWorkflow.updated_at : undefined, steps }, steps };
+  const data = record(payload, 'API');
+  const container = data.data === undefined ? data : (data.data && typeof data.data === 'object' ? data.data as Record<string, unknown> : data);
+  const rawWorkflow = (container.workflow && typeof container.workflow === 'object')
+    ? container.workflow as Record<string, unknown>
+    : container;
+
+  const rawSteps = Array.isArray(container.steps)
+    ? container.steps
+    : Array.isArray(rawWorkflow.steps)
+    ? rawWorkflow.steps
+    : [];
+
+  const id = String(rawWorkflow.id || '');
+  const userId = String(rawWorkflow.user_id || rawWorkflow.userId || DEMO_USER_UUID);
+  const goal = String(rawWorkflow.goal || goalFallback || '');
+  const status = (String(rawWorkflow.status || 'PENDING').toUpperCase()) as StepStatus;
+  const createdAt = String(rawWorkflow.created_at || rawWorkflow.createdAt || new Date().toISOString());
+  const updatedAt = typeof rawWorkflow.updated_at === 'string' ? rawWorkflow.updated_at : undefined;
+
+  const steps = rawSteps.map(mapStep);
+
+  return {
+    workflow: {
+      id,
+      user_id: userId,
+      goal,
+      status,
+      created_at: createdAt,
+      updated_at: updatedAt,
+      steps,
+    },
+    steps,
+  };
 }
-export function mapWorkflowResponse(payload: unknown, goalFallback: string): CreateWorkflowResponse { const snapshot = mapSnapshot(payload, goalFallback); return { workflow: snapshot.workflow, plan: snapshot.steps.map((step): PlannedStepPreview => ({ step_order: step.step_order, tool_name: step.tool_name, arguments: step.arguments, reasoning: `Execute ${step.tool_name}`, requires_approval: Boolean(step.requires_approval), risk_level: step.requires_approval ? 'HIGH' as ToolRiskLevel : 'LOW' as ToolRiskLevel })) }; }
+
+export function mapWorkflowResponse(payload: unknown, goalFallback: string): CreateWorkflowResponse {
+  const snapshot = mapSnapshot(payload, goalFallback);
+  return {
+    workflow: snapshot.workflow,
+    plan: snapshot.steps.map((step): PlannedStepPreview => ({
+      step_order: step.step_order,
+      tool_name: step.tool_name,
+      arguments: step.arguments,
+      reasoning: `Execute ${step.tool_name}`,
+      requires_approval: Boolean(step.requires_approval),
+      risk_level: step.requires_approval ? ('HIGH' as ToolRiskLevel) : ('LOW' as ToolRiskLevel),
+    })),
+  };
+}
 
 export class RealWorkflowApiService implements IWorkflowApiService {
   private baseUrl: string;
