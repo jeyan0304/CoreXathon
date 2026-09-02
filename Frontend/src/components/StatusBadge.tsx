@@ -40,6 +40,7 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
         </span>
       );
     case 'RUNNING':
+    case 'IN_PROGRESS':
       return (
         <span
           className={`inline-flex items-center rounded-full bg-blue-50 text-blue-700 border border-blue-200 ${sizeClasses}`}

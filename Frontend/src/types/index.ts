@@ -6,6 +6,7 @@
 export type StepStatus =
   | 'PENDING'
   | 'RUNNING'
+  | 'IN_PROGRESS'
   | 'WAITING_FOR_APPROVAL'
   | 'FAILED'
   | 'RETRYING'

@@ -28,9 +28,24 @@ export const ApprovalCard: React.FC<ApprovalCardProps> = ({
   const [rejecting, setRejecting] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
 
-  const handleRejectSubmit = () => {
-    onReject(step.id, rejectReason || 'Operator rejected change');
-    setRejecting(false);
+  const handleApproveClick = async () => {
+    try {
+      console.log(`[ApprovalCard] Invoking approval for step: ${step.id} (${step.tool_name})`);
+      await onApprove(step.id);
+    } catch (err) {
+      console.error(`[ApprovalCard] Failed during approve action for step: ${step.id}`, err);
+    }
+  };
+
+  const handleRejectSubmit = async () => {
+    try {
+      console.log(`[ApprovalCard] Invoking rejection for step: ${step.id} (${step.tool_name})`);
+      await onReject(step.id, rejectReason || 'Operator rejected change');
+    } catch (err) {
+      console.error(`[ApprovalCard] Failed during reject action for step: ${step.id}`, err);
+    } finally {
+      setRejecting(false);
+    }
   };
 
   const tableVal = step.arguments.table != null ? String(step.arguments.table) : null;
@@ -172,7 +187,7 @@ export const ApprovalCard: React.FC<ApprovalCardProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => onApprove(step.id)}
+            onClick={handleApproveClick}
             disabled={isLoading}
             className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 focus:ring-2 focus:ring-emerald-500 focus:ring-offset-1 transition-colors disabled:opacity-50"
           >

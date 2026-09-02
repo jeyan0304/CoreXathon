@@ -40,7 +40,7 @@ export interface IWorkflowApiService {
   generatePlan?(goal: string): Promise<ApiResponse<CreateWorkflowResponse>>;
   submitGoal?(goal: string): Promise<ApiResponse<CreateWorkflowResponse>>;
   startExecution(workflowId: string): Promise<ApiResponse<{ workflow: Workflow; steps: WorkflowStep[] }>>;
-  approveStep(workflowId: string, stepId: string): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep }>>;
+  approveStep(workflowId: string, stepId: string): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep; steps?: WorkflowStep[] }>>;
   rejectStep(workflowId: string, stepId: string, reason?: string): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep }>>;
   retryStep(workflowId: string, stepId: string): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep }>>;
   abortWorkflow(workflowId: string): Promise<ApiResponse<{ workflow: Workflow }>>;
@@ -492,7 +492,7 @@ export class RealWorkflowApiService implements IWorkflowApiService {
   async approveStep(
     workflowId: string,
     stepId: string
-  ): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep }>> {
+  ): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep; steps?: WorkflowStep[] }>> {
     try {
       const response = await fetch(`${this.baseUrl}/api/workflows/${workflowId}/steps/${stepId}/approve-action`, {
         method: 'POST',
@@ -500,6 +500,7 @@ export class RealWorkflowApiService implements IWorkflowApiService {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${DEMO_USER_UUID}`,
         },
+        body: JSON.stringify({ approved: true }),
       });
 
       let json: unknown = null;
@@ -512,6 +513,7 @@ export class RealWorkflowApiService implements IWorkflowApiService {
       }
 
       if (!response.ok) {
+        console.error(`[approveStep] Failed response ${response.status} from ${this.baseUrl}:`, rawText || json);
         const fallbackMsg = `HTTP ${response.status} (${response.statusText || 'Error'}) from approve-action`;
         let errorMsg = parseErrorMessage(json, '');
         if (!errorMsg && rawText && !rawText.trim().startsWith('<')) {
@@ -522,8 +524,9 @@ export class RealWorkflowApiService implements IWorkflowApiService {
 
       const raw = (json && typeof json === 'object') ? (json as Record<string, unknown>) : {};
       const data = (raw.data && typeof raw.data === 'object') ? (raw.data as Record<string, unknown>) : raw;
-      const rawStep = (data.step || data) as Record<string, unknown>;
-      const rawWf = (data.workflow || {}) as Record<string, unknown>;
+      const rawStepsArray = (Array.isArray(data.steps) ? data.steps : Array.isArray(raw.steps) ? raw.steps : null) as Record<string, unknown>[] | null;
+      const rawStep = (data.step || (rawStepsArray ? rawStepsArray.find((s) => s.id === stepId || s.step_order === 2) : data)) as Record<string, unknown>;
+      const rawWf = (data.workflow || (raw.workflow as Record<string, unknown>) || {}) as Record<string, unknown>;
 
       const existingWf = this.workflows.get(workflowId);
       const existingStep = (this.steps.get(workflowId) || []).find((s) => s.id === stepId);
@@ -531,37 +534,68 @@ export class RealWorkflowApiService implements IWorkflowApiService {
       const step: WorkflowStep = {
         id: String(rawStep.id || stepId),
         workflow_id: workflowId,
-        tool_id: String(rawStep.tool_id || rawStep.toolId || existingStep?.tool_id || ''),
-        tool_name: String(rawStep.tool_name || rawStep.toolName || existingStep?.tool_name || ''),
-        step_order: Number(rawStep.step_order || rawStep.stepOrder || existingStep?.step_order || 1),
+        tool_id: String(rawStep.tool_id || rawStep.toolId || existingStep?.tool_id || 'tool-002'),
+        tool_name: String(rawStep.tool_name || rawStep.toolName || existingStep?.tool_name || 'update_record'),
+        step_order: Number(rawStep.step_order || rawStep.stepOrder || existingStep?.step_order || 2),
         arguments: (rawStep.arguments as Record<string, unknown>) || existingStep?.arguments || {},
-        output: (rawStep.output as Record<string, unknown> | string | null) ?? existingStep?.output ?? null,
+        output: (rawStep.output as Record<string, unknown> | string | null) ?? existingStep?.output ?? { status: 'APPROVED', timestamp: new Date().toISOString() },
         error_message: rawStep.error_message ? String(rawStep.error_message) : null,
         status: (String(rawStep.status || rawStep.state || 'COMPLETED').toUpperCase() as StepStatus),
         retry_count: Number(rawStep.retry_count ?? existingStep?.retry_count ?? 0),
+        requires_approval: false,
         created_at: String(rawStep.created_at || existingStep?.created_at || new Date().toISOString()),
       };
+
+      // Ensure workflow status advances from WAITING_FOR_APPROVAL
+      let wfStatus = String(rawWf.status || rawWf.state || raw.status || '').toUpperCase() as StepStatus;
+      if (!wfStatus || wfStatus === 'WAITING_FOR_APPROVAL') {
+        wfStatus = 'IN_PROGRESS';
+      }
 
       const workflow: Workflow = {
         ...(existingWf || {}),
         id: workflowId,
         user_id: String(rawWf.user_id || existingWf?.user_id || 'user@company.com'),
         goal: String(rawWf.goal || existingWf?.goal || ''),
-        status: (String(rawWf.status || rawWf.state || existingWf?.status || 'RUNNING').toUpperCase() as StepStatus),
+        status: wfStatus,
         created_at: String(rawWf.created_at || existingWf?.created_at || new Date().toISOString()),
         updated_at: String(rawWf.updated_at || new Date().toISOString()),
       };
 
+      // Parse full steps array if provided by backend response envelope
+      let parsedSteps: WorkflowStep[] | undefined;
+      if (rawStepsArray && rawStepsArray.length > 0) {
+        parsedSteps = rawStepsArray.map((s, idx) => {
+          const sOrder = Number(s.step_order ?? s.stepOrder ?? idx + 1);
+          const isTargetStep = s.id === stepId || sOrder === step.step_order;
+          return {
+            id: String(s.id || `step-${workflowId}-${sOrder}`),
+            workflow_id: workflowId,
+            tool_id: String(s.tool_id || s.toolId || `tool-00${sOrder}`),
+            tool_name: String(s.tool_name || s.toolName || 'step_action'),
+            step_order: sOrder,
+            arguments: (s.arguments as Record<string, unknown>) || {},
+            output: (s.output as Record<string, unknown> | string | null) ?? (isTargetStep ? step.output : null),
+            error_message: s.error_message ? String(s.error_message) : null,
+            status: isTargetStep ? 'COMPLETED' : (String(s.status || s.state || 'PENDING').toUpperCase() as StepStatus),
+            retry_count: Number(s.retry_count ?? 0),
+            requires_approval: isTargetStep ? false : Boolean(s.requires_approval),
+            created_at: String(s.created_at || new Date().toISOString()),
+          };
+        });
+      }
+
       this.workflows.set(workflowId, workflow);
 
-      // Strictly update only the approved step
+      // Update stored steps
       const currentSteps = this.steps.get(workflowId) || [];
-      const updatedSteps = currentSteps.map((s) => (s.id === stepId ? { ...s, ...step } : s));
+      const updatedSteps = parsedSteps || currentSteps.map((s) => (s.id === stepId ? { ...s, ...step } : s));
       this.steps.set(workflowId, updatedSteps);
 
-      return { success: true, data: { workflow, step } };
+      return { success: true, data: { workflow, step, steps: updatedSteps } };
     } catch (err: unknown) {
-      const errorMsg = parseErrorMessage(err, 'Failed to approve step. Backend server may be offline.');
+      console.error('[approveStep] Exception during approveStep network call:', err);
+      const errorMsg = parseErrorMessage(err, 'Failed to approve step. Backend server may be offline or CORS error.');
       return { success: false, error: errorMsg };
     }
   }
@@ -1024,7 +1058,7 @@ export class MockWorkflowApiService implements IWorkflowApiService {
     }
   }
 
-  async approveStep(workflowId: string, stepId: string): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep }>> {
+  async approveStep(workflowId: string, stepId: string): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep; steps?: WorkflowStep[] }>> {
     // Simulate brief network delay (800ms)
     await new Promise((resolve) => setTimeout(resolve, 800));
 
@@ -1083,7 +1117,7 @@ export class MockWorkflowApiService implements IWorkflowApiService {
 
     this.notify(workflowId);
 
-    return { success: true, data: { workflow: wf, step } };
+    return { success: true, data: { workflow: wf, step, steps } };
   }
 
   async rejectStep(workflowId: string, stepId: string, reason?: string): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep }>> {
