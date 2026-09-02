@@ -6,8 +6,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from control_gate import ControlGateError, WorkflowControlGate
-from database import InMemoryDatabase
-from main import app, getControlGate
+from database import InMemoryDatabase, SupabaseDatabase
+from main import app, getControlGate, getPlanner
 
 
 USER_ID = uuid4()
@@ -31,6 +31,45 @@ def gate(database: InMemoryDatabase) -> WorkflowControlGate:
 @pytest.fixture
 def client(gate: WorkflowControlGate):
     app.dependency_overrides[getControlGate] = lambda: gate
+    app.dependency_overrides[getPlanner] = lambda: lambda goal: {
+        "goal": goal,
+        "steps": [
+            {
+                "step_id": "step_1",
+                "tool": "search_information",
+                "arguments": {
+                    "query": "Check status",
+                    "record_id": None,
+                    "status": None,
+                    "recipient": None,
+                    "message": None,
+                },
+            },
+            {
+                "step_id": "step_2",
+                "tool": "update_record",
+                "arguments": {
+                    "query": None,
+                    "record_id": "project-corexathon",
+                    "status": "completed",
+                    "recipient": None,
+                    "message": None,
+                },
+            },
+            {
+                "step_id": "step_3",
+                "tool": "send_notification",
+                "arguments": {
+                    "query": None,
+                    "record_id": None,
+                    "status": None,
+                    "recipient": "team@example.com",
+                    "message": "Project status updated",
+                },
+            },
+        ],
+        "reasoning": "Test planner reasoning.",
+    }
     with TestClient(app, raise_server_exceptions=False) as testClient:
         yield testClient
     app.dependency_overrides.clear()
@@ -247,15 +286,10 @@ def testApiUsesStrictEnvelopesAndKebabCaseRoutes(client: TestClient):
     assert created.status_code == 201
     body = created.json()
     assert body["success"] is True
-    workflowId = UUID(body["data"]["id"])
-
-    stored = client.post(
-        f"/api/workflows/{workflowId}/plans",
-        json={"steps": demoPlan(failNotificationOnce=False)},
-        headers=headers,
-    )
-    assert stored.status_code == 201
-    assert stored.json()["success"] is True
+    workflowId = UUID(body["data"]["workflow"]["id"])
+    assert body["data"]["reasoning"] == "Test planner reasoning."
+    assert body["data"]["steps"][0]["tool_name"] == "search_information"
+    assert body["data"]["steps"][0]["arguments"] == {"query": "Check status"}
 
     started = client.post(
         f"/api/workflows/{workflowId}/start-execution", headers=headers
@@ -284,6 +318,32 @@ def testApiUsesStrictEnvelopesAndKebabCaseRoutes(client: TestClient):
     }
 
 
+def testWorkflowCreationDoesNotPersistWhenPlannerReturnsNoSteps(
+    client: TestClient, gate: WorkflowControlGate
+):
+    app.dependency_overrides[getPlanner] = lambda: lambda goal: {
+        "goal": goal,
+        "steps": [],
+        "reasoning": "No registered tool can satisfy this goal.",
+    }
+
+    response = client.post(
+        "/api/workflows",
+        json={"goal": "Delete the production database"},
+        headers={"Authorization": f"Bearer {USER_ID}"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "success": False,
+        "error": {
+            "code": "PLANNING_FAILED",
+            "message": "The planner did not produce executable registered-tool steps.",
+        },
+    }
+    assert gate.database.workflows == {}
+
+
 def testApiRejectsMissingAuthenticationWithErrorEnvelope(client: TestClient):
     response = client.get("/api/tools")
 
@@ -304,6 +364,55 @@ def testApiRejectsUnknownBearerIdentity(client: TestClient):
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "UNAUTHORIZED"
+
+
+def testSupabaseDemoAuthenticationChecksPersistedUsersTable():
+    class Query:
+        def __init__(self):
+            self.filters = {}
+
+        def select(self, columns):
+            return self
+
+        def eq(self, column, value):
+            self.filters[column] = value
+            return self
+
+        def limit(self, count):
+            return self
+
+        def execute(self):
+            from types import SimpleNamespace
+
+            if self.filters.get("id") == str(USER_ID):
+                return SimpleNamespace(data=[{"id": str(USER_ID)}])
+            return SimpleNamespace(data=[])
+
+    class Client:
+        def table(self, name):
+            assert name == "users"
+            return Query()
+
+    database = SupabaseDatabase(Client())
+
+    assert database.authenticateToken(str(USER_ID)) == str(USER_ID)
+    assert database.authenticateToken(str(uuid4())) is None
+
+
+def testDemoToolSeedingRepairsStaleApprovalMetadata():
+    database = InMemoryDatabase()
+    database.createTool(
+        "send_notification",
+        "Stale definition",
+        {"type": "object"},
+        requiresApproval=True,
+    )
+
+    database.seedDemoTools()
+
+    tool = database.getToolByName("send_notification")
+    assert tool["requires_approval"] is False
+    assert tool["input_schema"]["required"] == ["recipient", "message"]
 
 
 def testFrameworkErrorsAlsoUseStrictErrorEnvelope(client: TestClient):

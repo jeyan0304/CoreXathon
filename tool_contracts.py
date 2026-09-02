@@ -25,5 +25,5 @@ class PlanOutput(BaseModel):
 REGISTERED_TOOLS = {
     "search_information": {"permission": "READ", "risk": "LOW", "requires_approval": False, "schema": SearchInfoInput},
     "update_record": {"permission": "WRITE", "risk": "HIGH", "requires_approval": True, "schema": UpdateRecordInput},
-    "send_notification": {"permission": "SEND", "risk": "HIGH", "requires_approval": True, "schema": SendNotificationInput}
+    "send_notification": {"permission": "SEND", "risk": "HIGH", "requires_approval": False, "schema": SendNotificationInput}
 }

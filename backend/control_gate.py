@@ -220,24 +220,7 @@ class WorkflowControlGate:
             )
         if self.database.listSteps(workflowId):
             raise ControlGateError("PLAN_ALREADY_EXISTS", "This workflow already has a plan.", 409)
-        if not isinstance(proposedSteps, list) or not proposedSteps:
-            raise ControlGateError("MALFORMED_PLAN", "Plan must contain a list of steps.")
-        if len(proposedSteps) > MAX_STEPS:
-            raise ControlGateError(
-                "STEP_LIMIT_EXCEEDED", "A workflow cannot contain more than 10 steps."
-            )
-
-        validated = []
-        for proposed in proposedSteps:
-            if not isinstance(proposed, dict) or set(proposed) != {"tool_name", "arguments"}:
-                raise ControlGateError("MALFORMED_PLAN", "Each plan step is malformed.")
-            tool = self.database.getToolByName(proposed["tool_name"])
-            if tool is None or tool["name"] not in self.executors:
-                raise ControlGateError(
-                    "UNKNOWN_TOOL", "The requested tool is not registered."
-                )
-            self._validateArguments(tool, proposed["arguments"])
-            validated.append((tool, proposed["arguments"]))
+        validated = self.validatePlan(proposedSteps)
 
         steps = [
             self.database.createStep(
@@ -257,6 +240,28 @@ class WorkflowControlGate:
             {"step_count": len(steps)},
         )
         return steps
+
+    def validatePlan(self, proposedSteps: Any) -> List[Any]:
+        """Validate an untrusted AI plan without persisting workflow state."""
+        if not isinstance(proposedSteps, list) or not proposedSteps:
+            raise ControlGateError("MALFORMED_PLAN", "Plan must contain a list of steps.")
+        if len(proposedSteps) > MAX_STEPS:
+            raise ControlGateError(
+                "STEP_LIMIT_EXCEEDED", "A workflow cannot contain more than 10 steps."
+            )
+
+        validated = []
+        for proposed in proposedSteps:
+            if not isinstance(proposed, dict) or set(proposed) != {"tool_name", "arguments"}:
+                raise ControlGateError("MALFORMED_PLAN", "Each plan step is malformed.")
+            tool = self.database.getToolByName(proposed["tool_name"])
+            if tool is None or tool["name"] not in self.executors:
+                raise ControlGateError(
+                    "UNKNOWN_TOOL", "The requested tool is not registered."
+                )
+            self._validateArguments(tool, proposed["arguments"])
+            validated.append((tool, proposed["arguments"]))
+        return validated
 
     def _executeStep(
         self, workflow: Dict[str, Any], step: Dict[str, Any], actor: str

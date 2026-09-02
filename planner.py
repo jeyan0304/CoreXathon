@@ -29,7 +29,13 @@ def get_client():
         if not api_key:
             return None
         try:
-            _client = genai.Client(api_key=api_key)
+            _client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(
+                    timeout=15_000,
+                    retry_options=types.HttpRetryOptions(attempts=1),
+                ),
+            )
         except Exception:
             return None
     return _client
@@ -115,9 +121,17 @@ def deterministic_fallback_planner(user_goal: str) -> Dict[str, Any]:
         target_status = "completed"
 
     # Extract recipient if present
-    recipient_match = re.search(r"(?:notify|alert|message|email|inform|ping)\s+(?:the\s+)?([a-zA-Z0-9_\-@]+)", cleaned_goal, re.IGNORECASE)
+    recipient_match = re.search(
+        r"(?:notify|alert|message|email|inform|ping)\s+"
+        r"(?:to\s+)?(?:the\s+)?(.+?)"
+        r"(?:\s+(?:about|regarding|that|on|when)\b|$)",
+        cleaned_goal,
+        re.IGNORECASE,
+    )
     if recipient_match:
-        recipient = recipient_match.group(1).lower().rstrip(".,")
+        recipient = re.sub(
+            r"\s+", "_", recipient_match.group(1).lower().strip().rstrip(".,")
+        )
         if recipient in ["about", "that", "on", "if", "when"]:
             recipient = "team"
     else:
@@ -147,13 +161,18 @@ def deterministic_fallback_planner(user_goal: str) -> Dict[str, Any]:
 
     # 3. Notification Step
     if wants_notify:
+        notification_message = (
+            f"Status update for {entity_display}: set to {target_status}."
+            if wants_update
+            else cleaned_goal
+        )
         steps.append(
             PlannedStep(
                 step_id=f"step_{step_num}",
                 tool="send_notification",
                 arguments=StepArguments(
                     recipient=recipient,
-                    message=f"Status update for {entity_display}: set to {target_status}."
+                    message=notification_message,
                 )
             )
         )
@@ -198,7 +217,7 @@ def generate_plan(user_goal: str) -> Dict[str, Any]:
     client = get_client()
     if client:
         try:
-            for model_name in ['gemini-2.5-flash', 'gemini-3.6-flash']:
+            for model_name in ['gemini-2.5-flash']:
                 try:
                     response = client.models.generate_content(
                         model=model_name,
