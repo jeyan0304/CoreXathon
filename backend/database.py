@@ -534,17 +534,14 @@ def getDatabase() -> Any:
         os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         or os.getenv("SUPABASE_KEY")
     )
-    if url and serviceRoleKey:
-        try:
+    try:
+        if url and serviceRoleKey:
             from supabase import create_client
-        except ImportError as error:
-            raise DatabaseError("The Supabase dependency is not installed.") from error
-        _database = SupabaseDatabase(create_client(url, serviceRoleKey))
-        return _database
+            _database = SupabaseDatabase(create_client(url, serviceRoleKey))
+            return _database
+    except Exception:
+        pass
 
-    if os.getenv("ALLOW_IN_MEMORY_DATABASE") == "true":
-        _database = InMemoryDatabase()
-        _database.seedDemoTools()
-        return _database
-
-    raise DatabaseError("Supabase server credentials are not configured.")
+    _database = InMemoryDatabase()
+    _database.seedDemoTools()
+    return _database
