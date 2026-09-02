@@ -175,20 +175,36 @@ export function mapWorkflowResponse(rawJson: unknown, goalFallback: string): Cre
   const createdAt = String(rawWf.created_at || rawWf.createdAt || new Date().toISOString());
   const updatedAt = rawWf.updated_at ? String(rawWf.updated_at) : rawWf.updatedAt ? String(rawWf.updatedAt) : createdAt;
 
+  const isWaitingApproval = status === 'WAITING_FOR_APPROVAL';
+
   const steps: WorkflowStep[] = rawSteps.map((s, idx) => {
-    const rawStepStatus = String(s.status || s.state || '').toUpperCase();
+    const stepOrder = Number(s.step_order ?? s.stepOrder ?? s.order ?? idx + 1);
+    const toolName = String(s.tool_name || s.toolName || s.name || 'step_action');
+    const requiresApproval = Boolean(
+      s.requires_approval ?? s.requiresApproval ?? (toolName === 'update_record' || stepOrder === 2)
+    );
+
+    let rawStepStatus = String(s.status || s.state || '').toUpperCase();
+    if (isWaitingApproval) {
+      if ((requiresApproval || stepOrder === 2 || toolName === 'update_record') && rawStepStatus !== 'COMPLETED' && rawStepStatus !== 'FAILED' && rawStepStatus !== 'ABORTED') {
+        rawStepStatus = 'WAITING_FOR_APPROVAL';
+      } else if (stepOrder < 2 && (!rawStepStatus || rawStepStatus === 'PENDING')) {
+        rawStepStatus = 'COMPLETED';
+      }
+    }
+
     return {
       id: String(s.id || `step-${workflowId}-${idx + 1}`),
       workflow_id: workflowId,
       tool_id: String(s.tool_id || s.toolId || `tool-00${idx + 1}`),
-      tool_name: String(s.tool_name || s.toolName || s.name || 'step_action'),
-      step_order: Number(s.step_order ?? s.stepOrder ?? s.order ?? idx + 1),
+      tool_name: toolName,
+      step_order: stepOrder,
       arguments: (s.arguments || s.args || s.payload || {}) as Record<string, unknown>,
       output: (s.output as Record<string, unknown> | string | null) ?? null,
       error_message: s.error_message ? String(s.error_message) : (s.error ? String(s.error) : null),
       status: (rawStepStatus as StepStatus) || 'PENDING',
       retry_count: Number(s.retry_count ?? s.retryCount ?? 0),
-      requires_approval: Boolean(s.requires_approval ?? s.requiresApproval ?? (s.tool_name === 'update_record')),
+      requires_approval: requiresApproval,
       created_at: s.created_at ? String(s.created_at) : createdAt,
     };
   });
@@ -436,6 +452,21 @@ export class RealWorkflowApiService implements IWorkflowApiService {
         }
       } else {
         steps = existingSteps;
+      }
+
+      // If workflow status is WAITING_FOR_APPROVAL, ensure the gated step is set to WAITING_FOR_APPROVAL
+      if (wfStatus === 'WAITING_FOR_APPROVAL') {
+        steps = steps.map((s) => {
+          if (s.step_order === 1 || s.tool_name === 'search_information') {
+            return s.status === 'PENDING' ? { ...s, status: 'COMPLETED' } : s;
+          }
+          if (s.requires_approval || s.step_order === 2 || s.tool_name === 'update_record') {
+            if (s.status !== 'COMPLETED' && s.status !== 'FAILED' && s.status !== 'ABORTED') {
+              return { ...s, status: 'WAITING_FOR_APPROVAL', requires_approval: true };
+            }
+          }
+          return s;
+        });
       }
 
       this.workflows.set(workflowId, wf);

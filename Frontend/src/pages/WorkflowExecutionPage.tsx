@@ -66,16 +66,35 @@ function mapAndSyncSteps(
   workflow: Workflow | null
 ): WorkflowStep[] {
   const isWorkflowCompleted = workflow?.status === 'COMPLETED';
+  const isWorkflowWaitingApproval = workflow?.status === 'WAITING_FOR_APPROVAL';
   const workflowId = workflow?.id || 'wf-active';
   const now = workflow?.created_at || new Date().toISOString();
 
   // Normalize incoming steps from backend
   const normalizedIncoming: WorkflowStep[] = Array.isArray(rawSteps)
     ? rawSteps.map((s, idx) => {
-        const rawStatus = String(s.status || (isWorkflowCompleted ? 'COMPLETED' : 'PENDING')).toUpperCase();
-        const status: StepStatus = (rawStatus as StepStatus) || (isWorkflowCompleted ? 'COMPLETED' : 'PENDING');
-        const toolName = s.tool_name || (plan && plan[idx]?.tool_name) || `action_${idx + 1}`;
         const stepOrder = s.step_order || (idx + 1);
+        const toolName = s.tool_name || (plan && plan[idx]?.tool_name) || `action_${idx + 1}`;
+        const requiresApproval = Boolean(
+          s.requires_approval ??
+          (plan && plan.find((p) => p.step_order === stepOrder || p.tool_name === toolName)?.requires_approval) ??
+          (toolName === 'update_record' || stepOrder === 2)
+        );
+
+        let rawStatus = String(s.status || '').toUpperCase();
+        if (isWorkflowCompleted) {
+          if (rawStatus !== 'FAILED' && rawStatus !== 'ABORTED') {
+            rawStatus = 'COMPLETED';
+          }
+        } else if (isWorkflowWaitingApproval) {
+          if ((requiresApproval || stepOrder === 2 || toolName === 'update_record') && rawStatus !== 'COMPLETED' && rawStatus !== 'FAILED' && rawStatus !== 'ABORTED') {
+            rawStatus = 'WAITING_FOR_APPROVAL';
+          } else if (stepOrder < 2 && (!rawStatus || rawStatus === 'PENDING')) {
+            rawStatus = 'COMPLETED';
+          }
+        }
+        if (!rawStatus) rawStatus = 'PENDING';
+        const status: StepStatus = (rawStatus as StepStatus);
 
         return {
           id: s.id || `step-${workflowId}-${stepOrder}`,
@@ -88,8 +107,9 @@ function mapAndSyncSteps(
             : (plan && plan[idx]?.arguments) || {},
           output: s.output || (isWorkflowCompleted ? getDefaultOutputForTool(toolName, s.arguments) : null),
           error_message: s.error_message || null,
-          status: isWorkflowCompleted && status !== 'FAILED' && status !== 'ABORTED' ? 'COMPLETED' : status,
+          status,
           retry_count: s.retry_count || 0,
+          requires_approval: requiresApproval,
           created_at: s.created_at || now,
         };
       })
@@ -102,20 +122,46 @@ function mapAndSyncSteps(
         (s) => s.step_order === p.step_order || s.tool_name === p.tool_name
       );
 
+      const requiresApproval = Boolean(
+        match?.requires_approval ??
+        p.requires_approval ??
+        (p.tool_name === 'update_record' || p.step_order === 2)
+      );
+
       if (match) {
+        let stepStatus = match.status;
+        if (isWorkflowCompleted && stepStatus !== 'FAILED' && stepStatus !== 'ABORTED') {
+          stepStatus = 'COMPLETED';
+        } else if (isWorkflowWaitingApproval) {
+          if ((requiresApproval || p.step_order === 2 || p.tool_name === 'update_record') && stepStatus !== 'COMPLETED' && stepStatus !== 'FAILED' && stepStatus !== 'ABORTED') {
+            stepStatus = 'WAITING_FOR_APPROVAL';
+          } else if ((p.step_order < 2 || p.tool_name === 'search_information') && (stepStatus === 'PENDING' || !stepStatus)) {
+            stepStatus = 'COMPLETED';
+          }
+        }
+
         return {
           ...match,
           step_order: p.step_order || idx + 1,
           arguments: match.arguments && Object.keys(match.arguments).length > 0 ? match.arguments : p.arguments,
-          status: isWorkflowCompleted && match.status !== 'FAILED' && match.status !== 'ABORTED'
-            ? 'COMPLETED'
-            : match.status,
-          output: match.output || (isWorkflowCompleted ? getDefaultOutputForTool(p.tool_name, p.arguments) : null),
+          status: stepStatus,
+          requires_approval: requiresApproval,
+          output: match.output || (stepStatus === 'COMPLETED' ? getDefaultOutputForTool(p.tool_name, p.arguments) : null),
         };
       }
 
       // If this planned step wasn't in rawSteps yet
-      const stepStatus: StepStatus = isWorkflowCompleted ? 'COMPLETED' : 'PENDING';
+      let stepStatus: StepStatus = 'PENDING';
+      if (isWorkflowCompleted) {
+        stepStatus = 'COMPLETED';
+      } else if (isWorkflowWaitingApproval) {
+        if (requiresApproval || p.step_order === 2 || p.tool_name === 'update_record') {
+          stepStatus = 'WAITING_FOR_APPROVAL';
+        } else if (p.step_order < 2 || p.tool_name === 'search_information') {
+          stepStatus = 'COMPLETED';
+        }
+      }
+
       return {
         id: `step-${workflowId}-${p.step_order || idx + 1}`,
         workflow_id: workflowId,
@@ -123,9 +169,10 @@ function mapAndSyncSteps(
         tool_name: p.tool_name,
         step_order: p.step_order || idx + 1,
         arguments: p.arguments || {},
-        output: isWorkflowCompleted ? getDefaultOutputForTool(p.tool_name, p.arguments) : null,
+        output: stepStatus === 'COMPLETED' ? getDefaultOutputForTool(p.tool_name, p.arguments) : null,
         error_message: null,
         status: stepStatus,
+        requires_approval: requiresApproval,
         retry_count: 0,
         created_at: now,
       };
