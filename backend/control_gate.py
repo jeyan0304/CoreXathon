@@ -220,6 +220,9 @@ class WorkflowControlGate:
             )
         return {**workflow, "steps": steps}
 
+    def listWorkflows(self, userId: UUID) -> List[Dict[str, Any]]:
+        return [self.getWorkflow(userId, workflow["id"]) for workflow in self.database.listWorkflows(userId)]
+
     def storePlan(
         self, userId: UUID, workflowId: Any, proposedSteps: Any
     ) -> List[Dict[str, Any]]:

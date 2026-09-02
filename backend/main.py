@@ -31,9 +31,16 @@ logger = logging.getLogger("workflow_backend")
 app = FastAPI(title="AI Workflow Automation Platform", version="1.0.0")
 
 # --- CORS Configuration Added Here ---
+corsOrigins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=corsOrigins,
+    allow_origin_regex=r"https://[a-z0-9-]+\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -221,7 +228,15 @@ def getWorkflow(
     userId: UUID = Depends(getCurrentUserId),
     gate: WorkflowControlGate = Depends(getControlGate),
 ) -> JSONResponse:
-    return success(gate.getWorkflow(userId, workflowId))
+    return success(workflowSnapshot(gate, userId, workflowId))
+
+
+@app.get("/api/workflows")
+def listWorkflows(
+    userId: UUID = Depends(getCurrentUserId),
+    gate: WorkflowControlGate = Depends(getControlGate),
+) -> JSONResponse:
+    return success(gate.listWorkflows(userId))
 
 
 @app.post("/api/workflows/{workflowId}/plans", status_code=201)

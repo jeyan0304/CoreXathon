@@ -178,6 +178,12 @@ class InMemoryDatabase:
             row = self.workflows.get(_uuid(workflowId))
         return self._copy(row)
 
+    def listWorkflows(self, userId: Any) -> List[Dict[str, Any]]:
+        userId = _uuid(userId)
+        with self._lock:
+            rows = [row for row in self.workflows.values() if row["user_id"] == userId]
+        return self._copy(sorted(rows, key=lambda row: row["created_at"], reverse=True))
+
     def updateWorkflow(self, workflowId: Any, changes: Dict[str, Any]) -> Dict[str, Any]:
         allowed = {"status"}
         if not changes or not set(changes).issubset(allowed):
@@ -395,6 +401,11 @@ class SupabaseDatabase:
 
     def getWorkflow(self, workflowId: Any) -> Optional[Dict[str, Any]]:
         return self._one(self._execute(self.client.table("workflows").select("*").eq("id", _uuid(workflowId)).limit(1)))
+
+    def listWorkflows(self, userId: Any) -> List[Dict[str, Any]]:
+        return self._execute(
+            self.client.table("workflows").select("*").eq("user_id", _uuid(userId)).order("created_at", desc=True)
+        )
 
     def updateWorkflow(self, workflowId: Any, changes: Dict[str, Any]) -> Dict[str, Any]:
         result = self._one(self._execute(self.client.table("workflows").update(changes).eq("id", _uuid(workflowId))))

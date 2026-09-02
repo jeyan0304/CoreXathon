@@ -113,6 +113,24 @@ def testUnknownToolIsRejectedBeforePlanPersistence(gate: WorkflowControlGate):
     assert gate.database.listSteps(workflow["id"]) == []
 
 
+def testWorkflowEndpointsReturnAuthoritativeSnapshots(client: TestClient):
+    headers = {"Authorization": f"Bearer {USER_ID}"}
+    created = client.post("/api/workflows", headers=headers, json={"goal": "check and update"})
+    assert created.status_code == 201
+    workflow_id = created.json()["data"]["workflow"]["id"]
+
+    fetched = client.get(f"/api/workflows/{workflow_id}", headers=headers)
+    assert fetched.status_code == 200
+    snapshot = fetched.json()["data"]
+    assert set(snapshot) == {"workflow", "steps"}
+    assert snapshot["workflow"]["id"] == workflow_id
+    assert len(snapshot["steps"]) == 3
+
+    listed = client.get("/api/workflows", headers=headers)
+    assert listed.status_code == 200
+    assert listed.json()["data"][0]["id"] == workflow_id
+
+
 def testInvalidArgumentsAreRejected(gate: WorkflowControlGate):
     workflow = gate.createWorkflow(USER_ID, "search")
 
