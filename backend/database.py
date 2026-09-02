@@ -443,16 +443,25 @@ class SupabaseDatabase:
         )
 
     def listAllAuditLogs(self, userId: Any) -> List[Dict[str, Any]]:
-        workflows = self._execute(self.client.table("workflows").select("id").eq("user_id", _uuid(userId)))
-        workflowIds = [row["id"] for row in workflows]
+        userId = _uuid(userId)
+        workflows = self.listWorkflows(userId)
+        workflowIds = {row["id"] for row in workflows}
         if not workflowIds:
             return []
-        return self._execute(
-            self.client.table("audit_logs")
-            .select("*")
-            .in_("workflow_id", workflowIds)
-            .order("created_at", desc=True)
-        )
+        try:
+            rows = self._execute(self.client.table("audit_logs").select("*").order("created_at"))
+            user_rows = [r for r in rows if r.get("workflow_id") in workflowIds]
+            user_rows.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+            return user_rows
+        except Exception:
+            all_logs: List[Dict[str, Any]] = []
+            for wid in workflowIds:
+                try:
+                    all_logs.extend(self.listAuditLogs(wid))
+                except Exception:
+                    pass
+            all_logs.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+            return all_logs
 
     def listPendingApprovals(self, userId: Any) -> List[Dict[str, Any]]:
         workflows = self._execute(self.client.table("workflows").select("id").eq("user_id", _uuid(userId)))

@@ -384,6 +384,38 @@ export class RealWorkflowApiService implements IWorkflowApiService {
   }
 
   async getTools(): Promise<ApiResponse<Tool[]>> {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/tools`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${DEMO_USER_UUID}`,
+        },
+      });
+      if (response.ok) {
+        const json = await response.json();
+        const rawData = (json && typeof json === 'object' && 'data' in json) ? (json as Record<string, unknown>).data : json;
+        if (Array.isArray(rawData) && rawData.length > 0) {
+          const mappedTools: Tool[] = rawData.map((t: Record<string, unknown>) => {
+            const name = String(t.name || '');
+            const requiresApproval = Boolean(t.requires_approval ?? (name === 'update_record'));
+            const riskLevel: ToolRiskLevel = requiresApproval ? 'HIGH' : 'LOW';
+            return {
+              id: String(t.id || `tool-${name}`),
+              name,
+              description: String(t.description || ''),
+              input_schema: (t.input_schema as Record<string, unknown>) || {},
+              risk_level: riskLevel,
+              requires_approval: requiresApproval,
+              status: 'ACTIVE' as const,
+              created_at: String(t.created_at || new Date().toISOString()),
+            };
+          });
+          return { success: true, data: mappedTools };
+        }
+      }
+    } catch (err) {
+      console.warn('[getTools] Network fetch failed, using default tools:', err);
+    }
     return { success: true, data: INITIAL_REGISTERED_TOOLS };
   }
 
@@ -1029,6 +1061,27 @@ export class RealWorkflowApiService implements IWorkflowApiService {
         if (Array.isArray(rawData)) {
           for (const row of rawData) {
             this.mergeAuditLogRow(row as Record<string, unknown>);
+          }
+        }
+      } else if (!workflowId) {
+        // Fallback: If global /api/audit-logs is not available, query per-workflow audit logs
+        const candidateIds = Array.from(this.workflows.keys()).slice(0, 10);
+        for (const wid of candidateIds) {
+          try {
+            const wfAuditRes = await fetch(`${this.baseUrl}/api/workflows/${wid}/audit-logs`, {
+              headers: { 'Authorization': `Bearer ${DEMO_USER_UUID}` },
+            });
+            if (wfAuditRes.ok) {
+              const wfJson = await wfAuditRes.json();
+              const wfLogs = (wfJson && typeof wfJson === 'object' && 'data' in wfJson) ? (wfJson as Record<string, unknown>).data : wfJson;
+              if (Array.isArray(wfLogs)) {
+                for (const row of wfLogs) {
+                  this.mergeAuditLogRow(row as Record<string, unknown>);
+                }
+              }
+            }
+          } catch {
+            // ignore individual workflow log error
           }
         }
       }
