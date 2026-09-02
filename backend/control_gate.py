@@ -208,7 +208,11 @@ class WorkflowControlGate:
 
     def getWorkflow(self, userId: UUID, workflowId: Any) -> Dict[str, Any]:
         workflow = self._requireWorkflow(userId, workflowId)
-        return {**workflow, "steps": self.database.listSteps(workflowId)}
+        return {
+            **workflow,
+            "steps": self.database.listSteps(workflowId),
+            "audit_logs": self.database.listAuditLogs(workflowId),
+        }
 
     def storePlan(
         self, userId: UUID, workflowId: Any, proposedSteps: Any
@@ -485,6 +489,12 @@ class WorkflowControlGate:
     def getTimeline(self, userId: UUID, workflowId: Any) -> List[Dict[str, Any]]:
         self._requireWorkflow(userId, workflowId)
         return self.database.listAuditLogs(workflowId)
+
+    def listWorkflows(self, userId: UUID) -> List[Dict[str, Any]]:
+        return self.database.listWorkflows(userId)
+
+    def listAllAuditLogs(self, userId: UUID) -> List[Dict[str, Any]]:
+        return self.database.listAllAuditLogs(userId)
 
     def getAuditLogs(self, userId: UUID, workflowId: Any) -> List[Dict[str, Any]]:
         return self.getTimeline(userId, workflowId)

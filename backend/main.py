@@ -244,3 +244,19 @@ def getAuditLogs(
     gate: WorkflowControlGate = Depends(getControlGate),
 ) -> JSONResponse:
     return success(gate.getAuditLogs(userId, workflowId))
+
+
+@app.get("/api/workflows")
+def listWorkflows(
+    userId: UUID = Depends(getCurrentUserId),
+    gate: WorkflowControlGate = Depends(getControlGate),
+) -> JSONResponse:
+    return success(gate.listWorkflows(userId))
+
+
+@app.get("/api/audit-logs")
+def listAllAuditLogs(
+    userId: UUID = Depends(getCurrentUserId),
+    gate: WorkflowControlGate = Depends(getControlGate),
+) -> JSONResponse:
+    return success(gate.listAllAuditLogs(userId))

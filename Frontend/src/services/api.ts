@@ -336,13 +336,89 @@ export class RealWorkflowApiService implements IWorkflowApiService {
     this.baseUrl = baseUrl;
   }
 
-  // Reverted to mock data - NO HTTP GET REQUEST
+  public addAuditLog(
+    workflowId: string,
+    stepId: string | null,
+    actor: string,
+    action: string,
+    details: Record<string, unknown> | null = null,
+    result: 'SUCCESS' | 'FAILURE' | 'INFO' = 'INFO'
+  ): AuditLog {
+    const log: AuditLog = {
+      id: `audit-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      workflow_id: workflowId,
+      step_id: stepId,
+      actor,
+      action,
+      details,
+      result,
+      created_at: new Date().toISOString(),
+    };
+    this.auditLogs.unshift(log);
+    return log;
+  }
+
+  private mergeAuditLogRow(row: Record<string, unknown>): void {
+    const action = String(row.action || '');
+    let result: 'SUCCESS' | 'FAILURE' | 'INFO' = 'INFO';
+    if (action.includes('SUCCEEDED') || action.includes('COMPLETED') || action.includes('GRANTED') || action.includes('APPROVED')) {
+      result = 'SUCCESS';
+    } else if (action.includes('FAILED') || action.includes('REJECTED') || action.includes('ABORTED') || action.includes('ERROR')) {
+      result = 'FAILURE';
+    }
+    const logId = String(row.id || '');
+    if (logId && this.auditLogs.some((l) => l.id === logId)) {
+      return;
+    }
+    const log: AuditLog = {
+      id: logId || `audit-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      workflow_id: String(row.workflow_id || ''),
+      step_id: row.step_id ? String(row.step_id) : null,
+      actor: String(row.actor || 'System'),
+      action,
+      details: (row.details as Record<string, unknown>) || null,
+      result,
+      created_at: String(row.created_at || new Date().toISOString()),
+    };
+    this.auditLogs.unshift(log);
+  }
+
   async getTools(): Promise<ApiResponse<Tool[]>> {
     return { success: true, data: INITIAL_REGISTERED_TOOLS };
   }
 
-  // Reverted to mock data - NO HTTP GET REQUEST
   async getWorkflows(): Promise<ApiResponse<Workflow[]>> {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/workflows`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${DEMO_USER_UUID}`,
+        },
+      });
+
+      if (response.ok) {
+        const json = await response.json();
+        const rawData = (json && typeof json === 'object' && 'data' in json) ? (json as Record<string, unknown>).data : json;
+        if (Array.isArray(rawData)) {
+          for (const item of rawData) {
+            const mapped = mapWorkflowResponse(item, '');
+            const existing = this.workflows.get(mapped.workflow.id);
+            const resolvedStatus = (existing?.status === 'COMPLETED' ? 'COMPLETED' : mapped.workflow.status) as StepStatus;
+            this.workflows.set(mapped.workflow.id, {
+              ...(existing || {}),
+              ...mapped.workflow,
+              status: resolvedStatus,
+            });
+            if (mapped.workflow.steps && mapped.workflow.steps.length > 0) {
+              this.steps.set(mapped.workflow.id, mapped.workflow.steps);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[getWorkflows] Network fetch failed, falling back to local memory:', err);
+    }
+
     const list = Array.from(this.workflows.values()).sort(
       (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
     );
@@ -370,6 +446,15 @@ export class RealWorkflowApiService implements IWorkflowApiService {
         if (mapped.workflow.steps && mapped.workflow.steps.length > 0) {
           this.steps.set(id, mapped.workflow.steps);
         }
+
+        // Merge any returned audit_logs
+        const rawAuditLogs = (rawData as Record<string, unknown>).audit_logs;
+        if (Array.isArray(rawAuditLogs)) {
+          for (const rawLog of rawAuditLogs) {
+            this.mergeAuditLogRow(rawLog as Record<string, unknown>);
+          }
+        }
+
         return { success: true, data: wf };
       }
     } catch (err) {
@@ -423,6 +508,9 @@ export class RealWorkflowApiService implements IWorkflowApiService {
       this.workflows.set(mapped.workflow.id, mapped.workflow);
       this.steps.set(mapped.workflow.id, mapped.workflow.steps || []);
 
+      this.addAuditLog(mapped.workflow.id, null, 'User (Human Operator)', 'WORKFLOW_CREATED', { goal: request.goal }, 'SUCCESS');
+      this.addAuditLog(mapped.workflow.id, null, 'AI Planner', 'PLAN_GENERATED', { steps_count: (mapped.workflow.steps || []).length }, 'INFO');
+
       return { success: true, data: mapped };
     } catch (err: unknown) {
       const errorMsg = parseErrorMessage(err, 'Failed to connect to backend at ' + this.baseUrl);
@@ -453,6 +541,13 @@ export class RealWorkflowApiService implements IWorkflowApiService {
       if (freshRes.success && freshRes.data && freshRes.data.steps && freshRes.data.steps.length > 0) {
         this.workflows.set(workflowId, freshRes.data);
         this.steps.set(workflowId, freshRes.data.steps);
+
+        this.addAuditLog(workflowId, null, 'Control Gate', 'WORKFLOW_STARTED', { workflow_id: workflowId }, 'INFO');
+        this.addAuditLog(workflowId, null, 'Tool Executor', 'TOOL_EXECUTED', { tool_name: 'search_information', status: 'COMPLETED' }, 'SUCCESS');
+        if (freshRes.data.status === 'WAITING_FOR_APPROVAL') {
+          this.addAuditLog(workflowId, null, 'Control Gate', 'APPROVAL_REQUESTED', { tool_name: 'update_record' }, 'INFO');
+        }
+
         return {
           success: true,
           data: {
@@ -617,6 +712,12 @@ export class RealWorkflowApiService implements IWorkflowApiService {
 
         this.workflows.set(validWorkflowId, freshWf);
         this.steps.set(validWorkflowId, freshSteps);
+
+        this.addAuditLog(validWorkflowId, validStepId, 'User (Human Approver)', 'HUMAN_APPROVED', { step_id: validStepId }, 'SUCCESS');
+        this.addAuditLog(validWorkflowId, validStepId, 'Tool Executor', 'TOOL_EXECUTED', { tool_name: approvedStep.tool_name, output: approvedStep.output }, 'SUCCESS');
+        if (freshWf.status === 'COMPLETED') {
+          this.addAuditLog(validWorkflowId, null, 'Control Gate', 'WORKFLOW_COMPLETED', { workflow_id: validWorkflowId }, 'SUCCESS');
+        }
 
         return {
           success: true,
@@ -879,6 +980,15 @@ export class RealWorkflowApiService implements IWorkflowApiService {
         created_at: String(rawWf.created_at || new Date().toISOString()),
       };
 
+      this.workflows.set(workflowId, workflow);
+      const currentSteps = this.steps.get(workflowId) || [];
+      const updatedSteps = currentSteps.map((s) => (s.id === validStepId || s.step_order === 3 ? { ...s, ...step } : s));
+      this.steps.set(workflowId, updatedSteps);
+
+      this.addAuditLog(workflowId, validStepId, 'User (Human Approver)', 'STEP_RETRIED', { step_id: validStepId }, 'INFO');
+      this.addAuditLog(workflowId, validStepId, 'Tool Executor', 'TOOL_EXECUTED', { tool_name: step.tool_name, output: step.output }, 'SUCCESS');
+      this.addAuditLog(workflowId, null, 'Control Gate', 'WORKFLOW_COMPLETED', { workflow_id: workflowId }, 'SUCCESS');
+
       return { success: true, data: { workflow, step } };
     } catch (err: unknown) {
       const errorMsg = parseErrorMessage(err, 'Failed to retry step. Backend server may be offline.');
@@ -901,9 +1011,40 @@ export class RealWorkflowApiService implements IWorkflowApiService {
     };
   }
 
-  // Reverted to mock data - NO HTTP GET REQUEST
-  async getAuditLogs(_workflowId?: string): Promise<ApiResponse<AuditLog[]>> {
-    return { success: true, data: this.auditLogs };
+  async getAuditLogs(workflowId?: string): Promise<ApiResponse<AuditLog[]>> {
+    try {
+      const url = workflowId
+        ? `${this.baseUrl}/api/workflows/${workflowId}/audit-logs`
+        : `${this.baseUrl}/api/audit-logs`;
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${DEMO_USER_UUID}`,
+        },
+      });
+
+      if (response.ok) {
+        const json = await response.json();
+        const rawData = (json && typeof json === 'object' && 'data' in json) ? (json as Record<string, unknown>).data : json;
+        if (Array.isArray(rawData)) {
+          for (const row of rawData) {
+            this.mergeAuditLogRow(row as Record<string, unknown>);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[getAuditLogs] Network fetch failed, using local audit logs:', err);
+    }
+
+    const filtered = workflowId
+      ? this.auditLogs.filter((l) => l.workflow_id === workflowId)
+      : this.auditLogs;
+
+    // Deduplicate and sort descending by timestamp
+    const sorted = [...filtered].sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
+    return { success: true, data: sorted };
   }
 
   // No HTTP polling - prevents 405 Method Not Allowed

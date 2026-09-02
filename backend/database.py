@@ -271,6 +271,31 @@ class InMemoryDatabase:
                 for row in self.auditLogs.values()
             )
 
+    def listWorkflows(self, userId: Any) -> List[Dict[str, Any]]:
+        userId = _uuid(userId)
+        with self._lock:
+            rows = sorted(
+                (row for row in self.workflows.values() if row["user_id"] == userId),
+                key=lambda row: row["created_at"],
+                reverse=True,
+            )
+        return self._copy(rows)
+
+    def listAllAuditLogs(self, userId: Any) -> List[Dict[str, Any]]:
+        userId = _uuid(userId)
+        with self._lock:
+            owned = {
+                workflow["id"]
+                for workflow in self.workflows.values()
+                if workflow["user_id"] == userId
+            }
+            rows = sorted(
+                (row for row in self.auditLogs.values() if row["workflow_id"] in owned),
+                key=lambda row: row["created_at"],
+                reverse=True,
+            )
+        return self._copy(rows)
+
     def listPendingApprovals(self, userId: Any) -> List[Dict[str, Any]]:
         userId = _uuid(userId)
         with self._lock:
@@ -408,6 +433,26 @@ class SupabaseDatabase:
     def hasAuditAction(self, workflowId: Any, stepId: Any, action: str) -> bool:
         rows = self._execute(self.client.table("audit_logs").select("id").eq("workflow_id", _uuid(workflowId)).eq("step_id", _uuid(stepId)).eq("action", action).limit(1))
         return bool(rows)
+
+    def listWorkflows(self, userId: Any) -> List[Dict[str, Any]]:
+        return self._execute(
+            self.client.table("workflows")
+            .select("*")
+            .eq("user_id", _uuid(userId))
+            .order("created_at", desc=True)
+        )
+
+    def listAllAuditLogs(self, userId: Any) -> List[Dict[str, Any]]:
+        workflows = self._execute(self.client.table("workflows").select("id").eq("user_id", _uuid(userId)))
+        workflowIds = [row["id"] for row in workflows]
+        if not workflowIds:
+            return []
+        return self._execute(
+            self.client.table("audit_logs")
+            .select("*")
+            .in_("workflow_id", workflowIds)
+            .order("created_at", desc=True)
+        )
 
     def listPendingApprovals(self, userId: Any) -> List[Dict[str, Any]]:
         workflows = self._execute(self.client.table("workflows").select("id").eq("user_id", _uuid(userId)))
