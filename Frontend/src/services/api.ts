@@ -40,9 +40,9 @@ export interface IWorkflowApiService {
   generatePlan?(goal: string): Promise<ApiResponse<CreateWorkflowResponse>>;
   submitGoal?(goal: string): Promise<ApiResponse<CreateWorkflowResponse>>;
   startExecution(workflowId: string): Promise<ApiResponse<{ workflow: Workflow; steps: WorkflowStep[] }>>;
-  approveStep(workflowId: string, stepId: string): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep; steps?: WorkflowStep[] }>>;
-  rejectStep(workflowId: string, stepId: string, reason?: string): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep }>>;
-  retryStep(workflowId: string, stepId: string): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep }>>;
+  approveStep(workflowId: string, stepId: string): Promise<ApiResponse<{ workflow: Workflow; steps?: WorkflowStep[]; step?: WorkflowStep }>>;
+  rejectStep(workflowId: string, stepId: string, reason?: string): Promise<ApiResponse<{ workflow: Workflow; steps?: WorkflowStep[]; step?: WorkflowStep }>>;
+  retryStep(workflowId: string, stepId: string): Promise<ApiResponse<{ workflow: Workflow; steps?: WorkflowStep[]; step?: WorkflowStep }>>;
   abortWorkflow(workflowId: string): Promise<ApiResponse<{ workflow: Workflow }>>;
   getAuditLogs(workflowId?: string): Promise<ApiResponse<AuditLog[]>>;
   subscribeToWorkflow(workflowId: string, onUpdate: (workflow: Workflow & { steps: WorkflowStep[] }) => void): () => void;
@@ -175,23 +175,11 @@ export function mapWorkflowResponse(rawJson: unknown, goalFallback: string): Cre
   const createdAt = String(rawWf.created_at || rawWf.createdAt || new Date().toISOString());
   const updatedAt = rawWf.updated_at ? String(rawWf.updated_at) : rawWf.updatedAt ? String(rawWf.updatedAt) : createdAt;
 
-  const isWaitingApproval = status === 'WAITING_FOR_APPROVAL';
-
   const steps: WorkflowStep[] = rawSteps.map((s, idx) => {
     const stepOrder = Number(s.step_order ?? s.stepOrder ?? s.order ?? idx + 1);
     const toolName = String(s.tool_name || s.toolName || s.name || 'step_action');
-    const requiresApproval = Boolean(
-      s.requires_approval ?? s.requiresApproval ?? (toolName === 'update_record' || stepOrder === 2)
-    );
-
-    let rawStepStatus = String(s.status || s.state || '').toUpperCase();
-    if (isWaitingApproval) {
-      if ((requiresApproval || stepOrder === 2 || toolName === 'update_record') && rawStepStatus !== 'COMPLETED' && rawStepStatus !== 'FAILED' && rawStepStatus !== 'ABORTED') {
-        rawStepStatus = 'WAITING_FOR_APPROVAL';
-      } else if (stepOrder < 2 && (!rawStepStatus || rawStepStatus === 'PENDING')) {
-        rawStepStatus = 'COMPLETED';
-      }
-    }
+    const requiresApproval = Boolean(s.requires_approval ?? s.requiresApproval);
+    const rawStepStatus = String(s.status || s.state || '').toUpperCase();
 
     return {
       id: String(s.id || `step-${workflowId}-${idx + 1}`),
@@ -228,54 +216,6 @@ export function mapWorkflowResponse(rawJson: unknown, goalFallback: string): Cre
       requires_approval: Boolean(s.requires_approval ?? (s.tool_name === 'update_record')),
       risk_level: (s.tool_name === 'update_record' ? 'HIGH' : 'LOW') as ToolRiskLevel,
     }));
-  } else {
-    // 3-step benchmark plan: low-risk search, high-risk update (human gate), low-risk notification
-    plan = [
-      {
-        step_order: 1,
-        tool_name: 'search_information',
-        reasoning: 'Search current project status, repository metrics, and latest progress updates.',
-        risk_level: 'LOW',
-        requires_approval: false,
-        arguments: { query: goal },
-      },
-      {
-        step_order: 2,
-        tool_name: 'update_record',
-        reasoning: 'Update live project record with synchronized status findings.',
-        risk_level: 'HIGH',
-        requires_approval: true,
-        arguments: { table: 'projects', change_summary: 'Synchronized status' },
-      },
-      {
-        step_order: 3,
-        tool_name: 'send_notification',
-        reasoning: 'Notify engineering team with updated status report.',
-        risk_level: 'LOW',
-        requires_approval: false,
-        arguments: { message: 'Project status synchronized successfully' },
-      },
-    ];
-  }
-
-  // If steps array is empty, materialize the 3 planned steps for execution
-  if (steps.length === 0 && plan.length > 0) {
-    plan.forEach((p) => {
-      steps.push({
-        id: `step-${workflowId}-${p.step_order}`,
-        workflow_id: workflowId,
-        tool_id: p.tool_name === 'search_information' ? 'tool-001' : p.tool_name === 'update_record' ? 'tool-002' : 'tool-003',
-        tool_name: p.tool_name,
-        step_order: p.step_order,
-        arguments: p.arguments,
-        output: null,
-        error_message: null,
-        status: 'PENDING',
-        retry_count: 0,
-        requires_approval: p.requires_approval,
-        created_at: createdAt,
-      });
-    });
   }
 
   const workflow: Workflow = {
@@ -330,7 +270,6 @@ export class RealWorkflowApiService implements IWorkflowApiService {
     INITIAL_SAMPLE_WORKFLOWS.map((wf) => [wf.id, wf])
   );
   private steps: Map<string, WorkflowStep[]> = new Map();
-  private auditLogs: AuditLog[] = [...INITIAL_AUDIT_LOGS];
 
   constructor(baseUrl: string = BASE_URL) {
     this.baseUrl = baseUrl;
@@ -492,7 +431,7 @@ export class RealWorkflowApiService implements IWorkflowApiService {
   async approveStep(
     workflowId: string,
     stepId: string
-  ): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep; steps?: WorkflowStep[] }>> {
+  ): Promise<ApiResponse<{ workflow: Workflow; steps?: WorkflowStep[]; step?: WorkflowStep }>> {
     try {
       const response = await fetch(`${this.baseUrl}/api/workflows/${workflowId}/steps/${stepId}/approve-action`, {
         method: 'POST',
@@ -522,10 +461,15 @@ export class RealWorkflowApiService implements IWorkflowApiService {
         return { success: false, error: errorMsg || fallbackMsg };
       }
 
+      const mapped = mapWorkflowResponse(json, this.workflows.get(workflowId)?.goal || '');
+      this.workflows.set(workflowId, mapped.workflow);
+      this.steps.set(workflowId, mapped.workflow.steps || []);
+      return { success: true, data: { workflow: mapped.workflow, steps: mapped.workflow.steps || [] } };
+
       const raw = (json && typeof json === 'object') ? (json as Record<string, unknown>) : {};
       const data = (raw.data && typeof raw.data === 'object') ? (raw.data as Record<string, unknown>) : raw;
       const rawStepsArray = (Array.isArray(data.steps) ? data.steps : Array.isArray(raw.steps) ? raw.steps : null) as Record<string, unknown>[] | null;
-      const rawStep = (data.step || (rawStepsArray ? rawStepsArray.find((s) => s.id === stepId || s.step_order === 2) : data)) as Record<string, unknown>;
+      const rawStep = (data.step || (rawStepsArray ? rawStepsArray!.find((s) => s.id === stepId) : data)) as Record<string, unknown>;
       const rawWf = (data.workflow || (raw.workflow as Record<string, unknown>) || {}) as Record<string, unknown>;
 
       const existingWf = this.workflows.get(workflowId);
@@ -564,8 +508,8 @@ export class RealWorkflowApiService implements IWorkflowApiService {
 
       // Parse full steps array if provided by backend response envelope
       let parsedSteps: WorkflowStep[] | undefined;
-      if (rawStepsArray && rawStepsArray.length > 0) {
-        parsedSteps = rawStepsArray.map((s, idx) => {
+      if (Array.isArray(rawStepsArray) && rawStepsArray!.length > 0) {
+        parsedSteps = rawStepsArray!.map((s, idx) => {
           const sOrder = Number(s.step_order ?? s.stepOrder ?? idx + 1);
           const isTargetStep = s.id === stepId || sOrder === step.step_order;
           return {
@@ -608,7 +552,7 @@ export class RealWorkflowApiService implements IWorkflowApiService {
     workflowId: string,
     stepId: string,
     reason?: string
-  ): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep }>> {
+  ): Promise<ApiResponse<{ workflow: Workflow; steps?: WorkflowStep[]; step?: WorkflowStep }>> {
     try {
       const response = await fetch(`${this.baseUrl}/api/workflows/${workflowId}/steps/${stepId}/reject-action`, {
         method: 'POST',
@@ -636,6 +580,11 @@ export class RealWorkflowApiService implements IWorkflowApiService {
         }
         return { success: false, error: errorMsg || fallbackMsg };
       }
+
+      const mapped = mapWorkflowResponse(json, this.workflows.get(workflowId)?.goal || '');
+      this.workflows.set(workflowId, mapped.workflow);
+      this.steps.set(workflowId, mapped.workflow.steps || []);
+      return { success: true, data: { workflow: mapped.workflow, steps: mapped.workflow.steps || [] } };
 
       const raw = (json && typeof json === 'object') ? (json as Record<string, unknown>) : {};
       const data = (raw.data && typeof raw.data === 'object') ? (raw.data as Record<string, unknown>) : raw;
@@ -688,7 +637,7 @@ export class RealWorkflowApiService implements IWorkflowApiService {
    * Strictly makes a POST request to ${BASE_URL}/api/workflows/${workflowId}/steps/${stepId}/retry-step
    * No JSON body required.
    */
-  async retryStep(workflowId: string, stepId: string): Promise<ApiResponse<{ workflow: Workflow; step: WorkflowStep }>> {
+  async retryStep(workflowId: string, stepId: string): Promise<ApiResponse<{ workflow: Workflow; steps?: WorkflowStep[]; step?: WorkflowStep }>> {
     try {
       const response = await fetch(`${this.baseUrl}/api/workflows/${workflowId}/steps/${stepId}/retry-step`, {
         method: 'POST',
@@ -715,6 +664,11 @@ export class RealWorkflowApiService implements IWorkflowApiService {
         }
         return { success: false, error: errorMsg || fallbackMsg };
       }
+
+      const mapped = mapWorkflowResponse(json, this.workflows.get(workflowId)?.goal || '');
+      this.workflows.set(workflowId, mapped.workflow);
+      this.steps.set(workflowId, mapped.workflow.steps || []);
+      return { success: true, data: { workflow: mapped.workflow, steps: mapped.workflow.steps || [] } };
 
       const raw = (json && typeof json === 'object') ? (json as Record<string, unknown>) : {};
       const data = (raw.data && typeof raw.data === 'object') ? (raw.data as Record<string, unknown>) : raw;
@@ -769,9 +723,22 @@ export class RealWorkflowApiService implements IWorkflowApiService {
     };
   }
 
-  // Reverted to mock data - NO HTTP GET REQUEST
-  async getAuditLogs(_workflowId?: string): Promise<ApiResponse<AuditLog[]>> {
-    return { success: true, data: this.auditLogs };
+  async getAuditLogs(workflowId?: string): Promise<ApiResponse<AuditLog[]>> {
+    if (!workflowId) {
+      return { success: true, data: [] };
+    }
+    try {
+      const response = await fetch(`${this.baseUrl}/api/workflows/${workflowId}/audit-logs`, {
+        headers: { 'Authorization': `Bearer ${DEMO_USER_UUID}` },
+      });
+      const json = await response.json();
+      if (!response.ok || !json.success) {
+        return { success: false, error: parseErrorMessage(json, 'Failed to load audit logs') };
+      }
+      return { success: true, data: Array.isArray(json.data) ? json.data as AuditLog[] : [] };
+    } catch (error) {
+      return { success: false, error: parseErrorMessage(error, 'Failed to load audit logs') };
+    }
   }
 
   // No HTTP polling - prevents 405 Method Not Allowed

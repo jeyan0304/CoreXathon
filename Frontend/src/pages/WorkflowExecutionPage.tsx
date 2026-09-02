@@ -275,7 +275,7 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
       if (res.success) {
         setActiveWorkflow(res.data.workflow);
         setCurrentPlan(res.data.plan);
-        setSteps(mapAndSyncSteps(res.data.workflow.steps, res.data.plan, res.data.workflow));
+        setSteps(res.data.workflow.steps || []);
       } else {
         setErrorMessage(parseErrorMessage(res.error, 'Error creating plan'));
       }
@@ -297,13 +297,7 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
       if (res.success) {
         const wf = res.data.workflow;
         setActiveWorkflow(wf);
-        const incomingSteps = (res.data.steps && res.data.steps.length > 0)
-          ? res.data.steps
-          : (wf.steps && wf.steps.length > 0)
-          ? wf.steps
-          : [];
-        const synced = mapAndSyncSteps(incomingSteps, currentPlan, wf);
-        setSteps(synced);
+        setSteps(res.data.steps || []);
 
         if (wf.status === 'COMPLETED' && !hasTriggeredConfetti) {
           setHasTriggeredConfetti(true);
@@ -334,6 +328,13 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
       // Strictly pass explicit workflowId and stepId with Bearer token & approved: true
       const res = await apiService.approveStep(activeWorkflow.id, stepId);
       if (res.success) {
+        setActiveWorkflow(res.data.workflow);
+        setSteps(res.data.steps || []);
+        if (res.data.workflow.status === 'COMPLETED' && !hasTriggeredConfetti) {
+          setHasTriggeredConfetti(true);
+          confetti({ particleCount: 80, spread: 70, origin: { y: 0.6 } });
+        }
+        return;
         const returnedWf = res.data.workflow;
         const returnedStep = res.data.step;
         const returnedSteps = res.data.steps;
@@ -416,6 +417,9 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
       // Strictly pass explicit workflowId, stepId, and reason
       const res = await apiService.rejectStep(activeWorkflow.id, stepId, reason);
       if (res.success) {
+        setActiveWorkflow(res.data.workflow);
+        setSteps(res.data.steps || []);
+        return;
         const returnedWf = res.data.workflow;
         const returnedStep = res.data.step;
 
@@ -458,6 +462,13 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
     try {
       const res = await apiService.retryStep(activeWorkflow.id, stepId);
       if (res.success) {
+        setActiveWorkflow(res.data.workflow);
+        setSteps(res.data.steps || []);
+        if (res.data.workflow.status === 'COMPLETED' && !hasTriggeredConfetti) {
+          setHasTriggeredConfetti(true);
+          confetti({ particleCount: 80, spread: 70, origin: { y: 0.6 } });
+        }
+        return;
         const completedWf: Workflow = {
           ...activeWorkflow,
           ...(res.data.workflow || {}),

@@ -28,7 +28,6 @@ interface WorkflowTimelineProps {
 
 export const WorkflowTimeline: React.FC<WorkflowTimelineProps> = ({
   steps,
-  workflowStatus,
   onApprove,
   onReject,
   onRetry,
@@ -110,13 +109,7 @@ export const WorkflowTimeline: React.FC<WorkflowTimelineProps> = ({
   return (
     <div className="relative pl-6 space-y-8 before:absolute before:left-[19px] before:top-4 before:bottom-4 before:w-[2px] before:bg-slate-200">
       {steps.map((step) => {
-        const isStepAwaitingApproval =
-          step.status === 'WAITING_FOR_APPROVAL' ||
-          (workflowStatus === 'WAITING_FOR_APPROVAL' &&
-            (Boolean(step.requires_approval) || step.step_order === 2 || step.tool_name === 'update_record') &&
-            step.status !== 'COMPLETED' &&
-            step.status !== 'FAILED' &&
-            step.status !== 'ABORTED');
+        const isStepAwaitingApproval = step.status === 'WAITING_FOR_APPROVAL';
         const isWaitingApproval = isStepAwaitingApproval;
         const isFailed = step.status === 'FAILED';
         const isExpanded = expandedDetails[step.id];
