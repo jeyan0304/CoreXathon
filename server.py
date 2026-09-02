@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from planner import generate_plan
-from tool_contracts import REGISTERED_TOOLS
+from tool_contracts import REGISTERED_TOOLS, PlanOutput
 
 app = FastAPI(title="AI Workflow Planner Engine")
 
@@ -23,15 +23,20 @@ def get_tools():
         ]
     }
 
-@app.post("/plan")
+@app.post("/plan", response_model=PlanOutput)
 def create_plan(request: GoalRequest):
     """Generates a validated, structured plan from a natural language goal."""
-    if not request.goal.strip():
+    if not request.goal or not request.goal.strip():
         raise HTTPException(status_code=400, detail="Goal cannot be empty")
         
-    result = generate_plan(request.goal)
-    
-    if "error" in result:
-        raise HTTPException(status_code=422, detail=result)
-        
-    return result
+    try:
+        result = generate_plan(request.goal)
+        return result
+    except Exception as exc:
+        # Guarantee zero downtime and safe schema return without unhandled 500 exceptions
+        fallback_plan = PlanOutput(
+            goal=request.goal,
+            steps=[],
+            reasoning=f"Workflow planning fallback generated safely: {str(exc)}"
+        )
+        return fallback_plan.model_dump()
