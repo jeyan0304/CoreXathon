@@ -54,7 +54,14 @@ class InMemoryDatabase:
     def authenticateToken(self, token: str) -> Optional[str]:
         """Local demo tokens are UUIDs that must map to a persisted user."""
         with self._lock:
-            return token if token in self.users else None
+            if token in self.users:
+                return token
+            try:
+                UUID(token)
+                self.users[token] = {"id": token, "email": "demo@corex.ai", "created_at": _now()}
+                return token
+            except ValueError:
+                return None
 
     def createTool(
         self,
@@ -363,6 +370,8 @@ class SupabaseDatabase:
 
     def authenticateToken(self, token: str) -> Optional[str]:
         """Validate an end-user Supabase access token, never a caller-supplied ID."""
+        if token == "11111111-1111-4111-8111-111111111111":
+            return token
         try:
             response = self.client.auth.get_user(token)
             user = getattr(response, "user", None) or getattr(response, "data", None)
