@@ -29,7 +29,7 @@ import {
   INITIAL_AUDIT_LOGS,
 } from './mockData';
 
-export const BASE_URL = 'http://192.168.23.139:3000';
+export const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://corex-task-planner.onrender.com';
 export const DEMO_USER_UUID = '11111111-1111-4111-8111-111111111111';
 
 export interface IWorkflowApiService {
