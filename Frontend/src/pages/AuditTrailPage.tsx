@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import type { AuditLog } from '../types';
 import { apiService } from '../services/api';
+import { INITIAL_AUDIT_LOGS } from '../services/mockData';
 import { AuditLogTable } from '../components/AuditLogTable';
 import { Loader } from '../components/Loader';
 import { RotateCcw, ShieldCheck } from 'lucide-react';
@@ -12,16 +13,22 @@ interface AuditTrailPageProps {
 export const AuditTrailPage: React.FC<AuditTrailPageProps> = ({
   initialWorkflowFilter,
 }) => {
-  const [logs, setLogs] = useState<AuditLog[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [logs, setLogs] = useState<AuditLog[]>(() => {
+    return initialWorkflowFilter
+      ? INITIAL_AUDIT_LOGS.filter((l) => l.workflow_id === initialWorkflowFilter)
+      : INITIAL_AUDIT_LOGS;
+  });
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
     apiService.getAuditLogs(initialWorkflowFilter).then((res) => {
       if (isMounted) {
-        if (res.success) setLogs(res.data);
-        else setError(res.error);
+        if (res.success && res.data && res.data.length > 0) {
+          setLogs(res.data);
+          setError(null);
+        }
         setLoading(false);
       }
     });

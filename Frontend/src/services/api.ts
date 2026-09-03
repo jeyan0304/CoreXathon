@@ -47,10 +47,27 @@ export class RealWorkflowApiService implements IWorkflowApiService {
   constructor(baseUrl = BASE_URL, accessTokenProvider = getAccessToken) { this.baseUrl = baseUrl; this.accessTokenProvider = accessTokenProvider; }
   private async request(path: string, method = 'GET', body?: unknown): Promise<unknown> {
     const accessToken = this.accessTokenProvider() || DEMO_USER_UUID;
-    const response = await fetch(`${this.baseUrl}${path}`, { method, headers: { Authorization: `Bearer ${accessToken}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, body: body === undefined ? undefined : JSON.stringify(body) });
-    const payload: unknown = await response.json().catch(() => null);
-    if (response.status === 401 && this.accessTokenProvider()) clearSession();
-    if (!response.ok) throw new Error(parseErrorMessage(payload, `HTTP ${response.status} from ${path}`)); return payload;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    try {
+      const response = await fetch(`${this.baseUrl}${path}`, {
+        method,
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      clearTimeout(timer);
+      const payload: unknown = await response.json().catch(() => null);
+      if (response.status === 401 && this.accessTokenProvider()) clearSession();
+      if (!response.ok) throw new Error(parseErrorMessage(payload, `HTTP ${response.status} from ${path}`));
+      return payload;
+    } catch (err) {
+      clearTimeout(timer);
+      throw err;
+    }
   }
   private async snapshot(path: string, method = 'GET', body?: unknown): Promise<ApiResponse<Snapshot>> { try { return { success: true, data: mapSnapshot(await this.request(path, method, body)) }; } catch (error) { return { success: false, error: parseErrorMessage(error) }; } }
   async getTools(): Promise<ApiResponse<Tool[]>> { try { const payload = record(await this.request('/api/tools'), 'tools'); const rows = Array.isArray(payload.data) ? payload.data : []; return { success: true, data: rows.map((tool) => { const item = (tool && typeof tool === 'object') ? (tool as Record<string, unknown>) : {}; return { ...item, risk_level: item.requires_approval ? 'HIGH' : 'LOW', status: 'ACTIVE' } as Tool; }) }; } catch (error) { console.warn('[getTools] Backend call failed, using default tools:', error); return { success: true, data: INITIAL_REGISTERED_TOOLS }; } }

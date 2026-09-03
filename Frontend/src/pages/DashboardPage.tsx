@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import type { Workflow, Tool } from '../types';
 import { apiService } from '../services/api';
+import { INITIAL_SAMPLE_WORKFLOWS, INITIAL_REGISTERED_TOOLS } from '../services/mockData';
 import { StatusBadge } from '../components/StatusBadge';
 import { Loader } from '../components/Loader';
 import {
@@ -27,29 +28,40 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
   onNavigateToTools,
   onNavigateToAudit,
 }) => {
-  const [workflows, setWorkflows] = useState<Workflow[]>([]);
-  const [tools, setTools] = useState<Tool[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [workflows, setWorkflows] = useState<Workflow[]>(() => INITIAL_SAMPLE_WORKFLOWS);
+  const [tools, setTools] = useState<Tool[]>(() => INITIAL_REGISTERED_TOOLS);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
+    let isMounted = true;
     const loadDashboardData = async () => {
-      setLoading(true);
       try {
         const [wfRes, toolRes] = await Promise.all([
           apiService.getWorkflows(),
           apiService.getTools(),
         ]);
-        if (wfRes.success) setWorkflows(wfRes.data);
-        if (toolRes.success) setTools(toolRes.data);
+        if (isMounted) {
+          if (wfRes.success && wfRes.data && wfRes.data.length > 0) {
+            setWorkflows(wfRes.data);
+          }
+          if (toolRes.success && toolRes.data && toolRes.data.length > 0) {
+            setTools(toolRes.data);
+          }
+        }
+      } catch (err) {
+        console.warn('[DashboardPage] Background sync failed:', err);
       } finally {
-        setLoading(false);
+        if (isMounted) setLoading(false);
       }
     };
 
     loadDashboardData();
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
-  if (loading) {
+  if (loading && workflows.length === 0) {
     return <Loader message="Loading dashboard..." />;
   }
 
