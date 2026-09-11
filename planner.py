@@ -3,8 +3,12 @@ import re
 import json
 import concurrent.futures
 from typing import Dict, Any, List, Optional
-from google import genai
-from google.genai import types
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None
+    types = None
 from tool_contracts import PlanOutput, PlannedStep, REGISTERED_TOOLS
 
 PLANNER_PROMPT = """
@@ -25,12 +29,20 @@ _client = None
 
 def get_client():
     global _client
+    if genai is None or types is None:
+        return None
     if _client is None:
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             return None
         try:
-            _client = genai.Client(api_key=api_key)
+            retry_cls = getattr(types, "HttpRetryOptions", getattr(types, "RetryOptions", None))
+            retry_opts = retry_cls(attempts=1) if retry_cls else None
+            http_options = types.HttpOptions(
+                timeout=15000,
+                retry_options=retry_opts
+            )
+            _client = genai.Client(api_key=api_key, http_options=http_options)
         except Exception:
             return None
     return _client
@@ -52,12 +64,14 @@ def deterministic_fallback_planner(user_goal: str) -> Dict[str, Any]:
         )
         return plan.model_dump()
 
-    # Check for explicitly unregistered or destructive actions without standard workflow intentions
+    # Check for explicitly unregistered or destructive actions (immediate security block)
     unregistered_keywords = ["delete", "drop", "destroy", "shutdown", "rm -rf", "wipe", "truncate", "kill"]
-    has_unregistered = any(re.search(rf"\b{kw}\b", lower_goal) for kw in unregistered_keywords)
-    has_standard = any(kw in lower_goal for kw in ["find", "search", "check", "notify", "update", "status"])
+    has_unregistered = any(
+        re.search(rf"\b{re.escape(kw)}\b", lower_goal) if not any(c in kw for c in " -") else kw in lower_goal
+        for kw in unregistered_keywords
+    )
 
-    if has_unregistered and not has_standard:
+    if has_unregistered:
         plan = PlanOutput(
             goal=cleaned_goal,
             steps=[],
@@ -81,48 +95,103 @@ def deterministic_fallback_planner(user_goal: str) -> Dict[str, Any]:
     wants_notify = any(re.search(rf"\b{kw}\b", lower_goal) for kw in notify_keywords)
 
     # Extract target entity/project name if present
-    project_match = re.search(r"\bproject\s+([a-zA-Z0-9_\-]+)", cleaned_goal, re.IGNORECASE)
-    record_match = re.search(r"\brecord\s+([a-zA-Z0-9_\-]+)", cleaned_goal, re.IGNORECASE)
+    excluded_words = {
+        "status", "record", "database", "the", "a", "an", "info", "details",
+        "completion", "update", "notification", "finished", "completed",
+        "and", "to", "of", "for", "in", "on", "at", "with", "from", "by",
+        "as", "is", "it", "or", "but", "so", "then", "all", "our", "my",
+        "this", "that", "these", "those", "team"
+    }
+
+    project_match = re.search(r"\bproject(?:[\s_:]+)([a-zA-Z0-9_\-]+)", cleaned_goal, re.IGNORECASE)
+    record_match = re.search(r"\brecord(?:[\s_:]+)([a-zA-Z0-9_\-]+)", cleaned_goal, re.IGNORECASE)
     named_project_match = re.search(r"\b([a-zA-Z0-9_\-]+)\s+project\b", cleaned_goal, re.IGNORECASE)
 
-    excluded_words = ["status", "record", "database", "the", "a", "an", "info", "details", "completion", "update", "notification", "finished", "completed"]
-    if project_match and project_match.group(1).lower() not in excluded_words:
-        raw_entity = project_match.group(1)
-        entity_name = f"project_{raw_entity.lower()}"
-        entity_display = f"project {raw_entity}"
-    elif record_match:
+    if record_match and record_match.group(1).lower() not in excluded_words:
         raw_entity = record_match.group(1)
-        entity_name = f"record_{raw_entity.lower()}"
+        entity_name = raw_entity.lower() if raw_entity.lower().startswith("record_") else f"record_{raw_entity.lower()}"
         entity_display = f"record {raw_entity}"
-    elif named_project_match and named_project_match.group(1).lower() not in ["find", "check", "the", "a", "this", "our", "my", "update", "delete", "notify"]:
+    elif project_match and project_match.group(1).lower() not in excluded_words:
+        raw_entity = project_match.group(1)
+        entity_name = raw_entity.lower() if raw_entity.lower().startswith("project_") else f"project_{raw_entity.lower()}"
+        entity_display = f"project {raw_entity}"
+    elif named_project_match and named_project_match.group(1).lower() not in excluded_words and named_project_match.group(1).lower() not in ["find", "check", "the", "a", "this", "our", "my", "update", "delete", "notify"]:
         raw_entity = named_project_match.group(1)
-        entity_name = f"project_{raw_entity.lower()}"
+        entity_name = raw_entity.lower() if raw_entity.lower().startswith("project_") else f"project_{raw_entity.lower()}"
         entity_display = f"project {raw_entity}"
     else:
         entity_name = "project_record"
         entity_display = "project"
 
-    # Extract target status if present
-    status_match = re.search(r"(?:to|as|status\s+to|status\s+as)\s+([a-zA-Z0-9_\-]+)", cleaned_goal, re.IGNORECASE)
-    if status_match:
-        target_status = status_match.group(1).lower().rstrip(".,")
-    elif "finished" in lower_goal:
-        target_status = "finished"
-    elif "completed" in lower_goal or "complete" in lower_goal:
-        target_status = "completed"
-    elif "in_progress" in lower_goal or "in progress" in lower_goal:
-        target_status = "in_progress"
-    else:
+    # Extract target status if present with stopword filtering
+    status_stopwords = {
+        "the", "a", "an", "team", "all", "user", "and", "or", "in", "for", "of", "to",
+        "email", "recipient", "project", "record", "database", "info", "notification",
+        "message", "channel", "slack", "me", "him", "her", "them", "us", "everyone"
+    }
+
+    target_status = None
+    explicit_status_match = re.search(
+        r"(?:status\s+(?:to|as|is|=)|set\s+(?:status\s+)?(?:to|as)|mark\s+(?:status\s+)?as|change\s+status\s+to|update\s+(?:status\s+)?to)\s+([a-zA-Z0-9_\-]+)",
+        cleaned_goal,
+        re.IGNORECASE
+    )
+    if explicit_status_match:
+        candidate = explicit_status_match.group(1).lower().rstrip(".,")
+        if candidate not in status_stopwords:
+            target_status = candidate
+
+    if not target_status:
+        known_statuses = [
+            "finished", "completed", "complete", "in_progress", "in progress",
+            "done", "active", "pending", "failed", "closed", "resolved",
+            "approved", "cancelled"
+        ]
+        for s in known_statuses:
+            if re.search(rf"\b{re.escape(s)}\b", lower_goal):
+                target_status = "completed" if s == "complete" else ("in_progress" if s == "in progress" else s)
+                break
+
+    if not target_status:
+        fallback_status_match = re.search(r"\b(?:to|as)\s+([a-zA-Z0-9_\-]+)", cleaned_goal, re.IGNORECASE)
+        if fallback_status_match:
+            candidate = fallback_status_match.group(1).lower().rstrip(".,")
+            if candidate not in status_stopwords and len(candidate) > 2:
+                target_status = candidate
+
+    if not target_status:
         target_status = "completed"
 
     # Extract recipient if present
-    recipient_match = re.search(r"(?:notify|alert|message|email|inform|ping)\s+(?:the\s+)?([a-zA-Z0-9_\-@]+)", cleaned_goal, re.IGNORECASE)
+    recipient = "team"
+    recipient_match = re.search(
+        r"(?:send\s+(?:an?\s+)?(?:email|notification|message|alert)\s+to|(?:notify|alert|message|email|inform|ping))\s+(?:to\s+)?(?:the\s+)?(.+?)(?=\s+(?:regarding|about|that|saying|with|for\s+the|for\s+project|\.|$)|$)",
+        cleaned_goal,
+        re.IGNORECASE
+    )
     if recipient_match:
-        recipient = recipient_match.group(1).lower().rstrip(".,")
-        if recipient in ["about", "that", "on", "if", "when"]:
-            recipient = "team"
-    else:
+        raw_recip = recipient_match.group(1).strip().rstrip(".,")
+        raw_recip = re.sub(r"^(?:to|the|a|an)\s+", "", raw_recip, flags=re.IGNORECASE).strip()
+        if raw_recip and raw_recip.lower() not in ["about", "that", "on", "if", "when", "to", "the", "a", "an", "all", "our"]:
+            if "@" in raw_recip or re.match(r"^[a-zA-Z0-9_\-]+$", raw_recip):
+                recipient = raw_recip.lower()
+            else:
+                recipient = re.sub(r"[^\w]+", "_", raw_recip.strip()).strip("_").lower()
+
+    if not recipient or len(recipient) < 3 or recipient in ["to", "the", "about", "that", "all"]:
         recipient = "team"
+
+    # Construct notification message
+    regarding_match = re.search(r"(?:regarding|about|saying|with\s+message)\s+(.+)", cleaned_goal, re.IGNORECASE)
+    if regarding_match:
+        extracted_msg = regarding_match.group(1).strip().rstrip(".")
+        notification_message = extracted_msg[0].upper() + extracted_msg[1:] if extracted_msg else cleaned_goal
+    elif wants_update:
+        notification_message = f"Status update for {entity_display}: set to {target_status}."
+    elif wants_search:
+        notification_message = f"Information report for {entity_display}."
+    else:
+        notification_message = cleaned_goal
 
     # 1. Search Step
     if wants_search:
@@ -154,7 +223,7 @@ def deterministic_fallback_planner(user_goal: str) -> Dict[str, Any]:
                 tool_name="send_notification",
                 arguments={
                     "recipient": recipient,
-                    "message": f"Status update for {entity_display}: set to {target_status}."
+                    "message": notification_message
                 }
             )
         )
@@ -210,7 +279,7 @@ def _try_ai_planning(user_goal: str) -> Optional[Dict[str, Any]]:
     if not client:
         return None
 
-    for model_name in ['gemini-2.5-flash', 'gemini-3.6-flash']:
+    for model_name in ['gemini-2.5-flash', 'gemini-2.5-pro']:
         try:
             res = _call_gemini_model(client, model_name, user_goal)
             if res is not None:
@@ -232,15 +301,23 @@ def generate_plan(user_goal: str) -> Dict[str, Any]:
         )
         return plan.model_dump()
 
-    # Strict 15-second timeout enforcement
+    # Pre-emptively reject destructive or unregistered actions via deterministic safety rules
+    lower_goal = user_goal.lower()
+    unregistered_keywords = ["delete", "drop", "destroy", "shutdown", "rm -rf", "wipe", "truncate", "kill"]
+    if any(re.search(rf"\b{re.escape(kw)}\b", lower_goal) if not any(c in kw for c in " -") else kw in lower_goal for kw in unregistered_keywords):
+        return deterministic_fallback_planner(user_goal)
+
+    # Strict 15-second timeout enforcement without blocking on worker thread completion
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_try_ai_planning, user_goal)
-            result = future.result(timeout=15.0)
-            if result is not None:
-                return result
+        future = executor.submit(_try_ai_planning, user_goal)
+        result = future.result(timeout=15.0)
+        if result is not None:
+            return result
     except (concurrent.futures.TimeoutError, Exception):
         pass
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
     # Seamless deterministic fallback for zero downtime
     return deterministic_fallback_planner(user_goal)

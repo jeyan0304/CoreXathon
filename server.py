@@ -1,9 +1,18 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from planner import generate_plan
 from tool_contracts import REGISTERED_TOOLS, PlanOutput
 
 app = FastAPI(title="AI Workflow Planner Engine")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class GoalRequest(BaseModel):
     goal: str
