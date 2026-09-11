@@ -17,6 +17,9 @@ class PlannedStep(BaseModel):
     step_id: str = Field(..., description="Sequential step ID")
     tool_name: str = Field(..., description="Registered tool name")
     arguments: Dict[str, Any] = Field(default_factory=dict, description="Tool arguments matching registered tools")
+    @property
+    def tool(self) -> str:
+        return self.tool_name
 
     @model_validator(mode="before")
     @classmethod
