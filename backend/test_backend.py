@@ -522,3 +522,37 @@ def testSupabaseSocketErrorAutoRecovery():
 
     assert res == [{"id": "recovered"}]
     assert len(reset_called) == 1
+
+
+def testPostgrestUniqueViolation23505HandledGracefully():
+    from postgrest.exceptions import APIError
+
+    class MockReq:
+        path = "https://example.supabase.co/rest/v1/audit_logs"
+        json = {"id": "11111111-1111-1111-1111-111111111111"}
+
+    class MockQuery:
+        request = MockReq()
+
+        def execute(self):
+            raise APIError({"code": "23505", "message": "duplicate key value violates unique constraint"})
+
+    class MockClient:
+        def table(self, name):
+            class MockTable:
+                def select(self, *args):
+                    return self
+                def eq(self, *args):
+                    return self
+                def limit(self, *args):
+                    return self
+                def execute(self):
+                    class Resp:
+                        data = [{"id": "11111111-1111-1111-1111-111111111111", "status": "existing"}]
+                    return Resp()
+            return MockTable()
+
+    db = SupabaseDatabase(MockClient(), url="https://example.supabase.co", key="fake-key")
+    res = db._execute(MockQuery())
+
+    assert res == [{"id": "11111111-1111-1111-1111-111111111111", "status": "existing"}]

@@ -24,6 +24,18 @@ from threading import RLock
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
+try:
+    from postgrest.exceptions import APIError
+except ImportError:
+    class APIError(Exception):  # type: ignore
+        code: Optional[str] = None
+
+try:
+    from supabase import ClientOptions, create_client
+except ImportError:
+    ClientOptions = None  # type: ignore
+    create_client = None  # type: ignore
+
 logger = logging.getLogger("workflow_backend.database")
 
 
@@ -369,13 +381,43 @@ class SupabaseDatabase:
                     self.client.postgrest.session.close()
             except Exception:
                 pass
-            if self.url and self.key:
+            if self.url and self.key and create_client is not None:
                 try:
-                    from supabase import create_client
-                    self.client = create_client(self.url, self.key)
+                    options = ClientOptions(postgrest_client_timeout=30) if ClientOptions is not None else None
+                    self.client = create_client(self.url, self.key, options=options)
                     logger.info("Successfully re-initialized Supabase client after socket/network reset.")
                 except Exception as exc:
                     logger.error("Failed to re-initialize Supabase client: %s", exc)
+
+    def _resolve_existing_record(self, query: Any) -> Optional[List[Dict[str, Any]]]:
+        try:
+            if hasattr(query, "request"):
+                path = getattr(query.request, "path", None)
+                payload = getattr(query.request, "json", None)
+                table_name = None
+                if path:
+                    clean_path = str(path).split("?")[0].rstrip("/")
+                    table_name = clean_path.split("/")[-1]
+                record_id = None
+                if isinstance(payload, dict):
+                    record_id = payload.get("id")
+                elif isinstance(payload, list) and payload and isinstance(payload[0], dict):
+                    record_id = payload[0].get("id")
+                if table_name and record_id:
+                    res = (
+                        self.client.table(table_name)
+                        .select("*")
+                        .eq("id", str(record_id))
+                        .limit(1)
+                        .execute()
+                    )
+                    if res and res.data:
+                        return res.data
+                elif isinstance(payload, dict) and "id" in payload:
+                    return [payload]
+        except Exception as resolve_err:
+            logger.warning("Could not resolve existing record after 23505: %s", resolve_err)
+        return None
 
     def _execute(self, query: Any) -> List[Dict[str, Any]]:
         max_attempts = 3
@@ -383,6 +425,19 @@ class SupabaseDatabase:
             try:
                 response = query.execute()
                 return response.data or []
+            except APIError as api_error:
+                err_code = getattr(api_error, "code", None)
+                if err_code == "23505" or "23505" in str(api_error):
+                    logger.info(
+                        "PostgREST unique constraint violation (23505) caught silently on insert/retry. "
+                        "Returning existing record."
+                    )
+                    existing = self._resolve_existing_record(query)
+                    if existing is not None:
+                        return existing
+                    return []
+                logger.error("Database operation failed with APIError: %s", api_error, exc_info=True)
+                raise DatabaseError("The database operation failed.") from api_error
             except Exception as error:
                 err_str = str(error)
                 err_type = type(error).__name__.lower()
@@ -391,6 +446,10 @@ class SupabaseDatabase:
                     or "socket" in err_str.lower()
                     or "timeout" in err_str.lower()
                     or "connection" in err_str.lower()
+                    or "terminated" in err_str.lower()
+                    or "error_code:1" in err_str.lower()
+                    or "error_code:9" in err_str.lower()
+                    or "protocolerror" in err_type
                     or "readerror" in err_type
                     or "connecterror" in err_type
                     or "networkerror" in err_type
@@ -418,7 +477,7 @@ class SupabaseDatabase:
 
     def createUser(self, userId: UUID, email: str) -> Dict[str, Any]:
         row = {"id": _uuid(userId), "email": email}
-        result = self._one(self._execute(self.client.table("users").insert(row)))
+        result = self._one(self._execute(self.client.table("users").upsert(row)))
         if result is None:
             raise DatabaseError("The user could not be created.")
         return result
@@ -458,7 +517,7 @@ class SupabaseDatabase:
 
     def createTool(self, name: str, description: str, inputSchema: Dict[str, Any], requiresApproval: bool = False, toolId: Optional[UUID] = None) -> Dict[str, Any]:
         row = {"id": _uuid(toolId or uuid4()), "name": name, "description": description, "input_schema": inputSchema, "requires_approval": requiresApproval}
-        result = self._one(self._execute(self.client.table("tools").insert(row)))
+        result = self._one(self._execute(self.client.table("tools").upsert(row)))
         if result is None:
             raise DatabaseError("The tool could not be created.")
         return result
@@ -487,6 +546,9 @@ class SupabaseDatabase:
             )
         )
         if result is None:
+            existing = self.getTool(toolId)
+            if existing:
+                return existing
             raise DatabaseError("Tool not found.")
         return result
 
@@ -501,7 +563,7 @@ class SupabaseDatabase:
 
     def createWorkflow(self, userId: Any, goal: str, status: str) -> Dict[str, Any]:
         row = {"id": _uuid(uuid4()), "user_id": _uuid(userId), "goal": goal, "status": status}
-        result = self._one(self._execute(self.client.table("workflows").insert(row)))
+        result = self._one(self._execute(self.client.table("workflows").upsert(row)))
         if result is None:
             raise DatabaseError("The workflow could not be created.")
         return result
@@ -512,6 +574,9 @@ class SupabaseDatabase:
     def updateWorkflow(self, workflowId: Any, changes: Dict[str, Any]) -> Dict[str, Any]:
         result = self._one(self._execute(self.client.table("workflows").update(changes).eq("id", _uuid(workflowId))))
         if result is None:
+            existing = self.getWorkflow(workflowId)
+            if existing:
+                return existing
             raise DatabaseError("Workflow not found.")
         return result
 
@@ -522,11 +587,15 @@ class SupabaseDatabase:
             .eq("id", _uuid(workflowId))
             .eq("status", expectedStatus)
         )
+        if not rows:
+            wf = self.getWorkflow(workflowId)
+            if wf and wf.get("status") == targetStatus:
+                return wf
         return self._one(rows)
 
     def createStep(self, workflowId: Any, toolId: Any, stepOrder: int, arguments: Dict[str, Any], status: str) -> Dict[str, Any]:
         row = {"id": _uuid(uuid4()), "workflow_id": _uuid(workflowId), "tool_id": _uuid(toolId), "step_order": stepOrder, "arguments": arguments, "output": None, "status": status, "retry_count": 0}
-        result = self._one(self._execute(self.client.table("workflow_steps").insert(row)))
+        result = self._one(self._execute(self.client.table("workflow_steps").upsert(row)))
         if result is None:
             raise DatabaseError("The workflow step could not be created.")
         return result
@@ -547,6 +616,9 @@ class SupabaseDatabase:
                 cleanChanges["output"]["error"] = err_msg
         result = self._one(self._execute(self.client.table("workflow_steps").update(cleanChanges).eq("id", _uuid(stepId))))
         if result is None:
+            existing = self.getStep(stepId)
+            if existing:
+                return existing
             raise DatabaseError("Workflow step not found.")
         if err_msg and "error_message" not in result:
             result["error_message"] = err_msg
@@ -559,11 +631,15 @@ class SupabaseDatabase:
             .eq("id", _uuid(stepId))
             .eq("status", "WAITING_FOR_APPROVAL")
         )
+        if not rows:
+            step = self.getStep(stepId)
+            if step and step.get("status") == "PENDING":
+                return step
         return self._one(rows)
 
     def appendAuditLog(self, workflowId: Any, stepId: Optional[Any], actor: str, action: str, details: Dict[str, Any]) -> Dict[str, Any]:
         row = {"id": _uuid(uuid4()), "workflow_id": _uuid(workflowId), "step_id": _uuid(stepId) if stepId is not None else None, "actor": actor, "action": action, "details": details}
-        result = self._one(self._execute(self.client.table("audit_logs").insert(row)))
+        result = self._one(self._execute(self.client.table("audit_logs").upsert(row)))
         if result is None:
             raise DatabaseError("The audit event could not be recorded.")
         return result
@@ -634,9 +710,9 @@ def getDatabase() -> Any:
             f"Falling back to InMemoryDatabase."
         )
     try:
-        if url and serviceRoleKey:
-            from supabase import create_client
-            _database = SupabaseDatabase(create_client(url, serviceRoleKey), url=url, key=serviceRoleKey)
+        if url and serviceRoleKey and create_client is not None:
+            options = ClientOptions(postgrest_client_timeout=30) if ClientOptions is not None else None
+            _database = SupabaseDatabase(create_client(url, serviceRoleKey, options=options), url=url, key=serviceRoleKey)
             print(f"[AUTH DEBUG] SupabaseDatabase client successfully connected to {url}.")
             try:
                 _database.seedDemoTools()
