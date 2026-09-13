@@ -16,11 +16,15 @@ if _backendEnv.exists():
 load_dotenv()
 
 import copy
+import logging
 import os
+import time
 from datetime import datetime, timezone
 from threading import RLock
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
+
+logger = logging.getLogger("workflow_backend.database")
 
 
 class DatabaseError(RuntimeError):
@@ -351,15 +355,63 @@ class InMemoryDatabase:
 class SupabaseDatabase:
     """Five-table persistence adapter backed by Supabase/PostgreSQL."""
 
-    def __init__(self, client: Any) -> None:
+    def __init__(self, client: Any, url: Optional[str] = None, key: Optional[str] = None) -> None:
         self.client = client
+        self.url = url
+        self.key = key
+        self._lock = RLock()
+
+    def _reset_client(self) -> None:
+        """Safely re-create the Supabase client when socket or pool errors occur."""
+        with self._lock:
+            try:
+                if hasattr(self, "client") and hasattr(self.client, "postgrest") and hasattr(self.client.postgrest, "session"):
+                    self.client.postgrest.session.close()
+            except Exception:
+                pass
+            if self.url and self.key:
+                try:
+                    from supabase import create_client
+                    self.client = create_client(self.url, self.key)
+                    logger.info("Successfully re-initialized Supabase client after socket/network reset.")
+                except Exception as exc:
+                    logger.error("Failed to re-initialize Supabase client: %s", exc)
 
     def _execute(self, query: Any) -> List[Dict[str, Any]]:
-        try:
-            response = query.execute()
-            return response.data or []
-        except Exception as error:
-            raise DatabaseError("The database operation failed.") from error
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                response = query.execute()
+                return response.data or []
+            except Exception as error:
+                err_str = str(error)
+                err_type = type(error).__name__.lower()
+                is_socket_error = (
+                    "10035" in err_str
+                    or "socket" in err_str.lower()
+                    or "timeout" in err_str.lower()
+                    or "connection" in err_str.lower()
+                    or "readerror" in err_type
+                    or "connecterror" in err_type
+                    or "networkerror" in err_type
+                    or isinstance(error, (OSError, TimeoutError))
+                )
+                if is_socket_error and attempt < max_attempts - 1 and self.url and self.key:
+                    logger.warning(
+                        "Database socket/network error encountered (%s). "
+                        "Re-initializing Supabase client and retrying attempt %d/%d...",
+                        error,
+                        attempt + 2,
+                        max_attempts,
+                    )
+                    time.sleep(0.15 * (attempt + 1))
+                    self._reset_client()
+                    if hasattr(query, "request") and hasattr(query.request, "session"):
+                        query.request.session = self.client.postgrest.session
+                    continue
+                logger.error("The database operation failed: %s", error, exc_info=True)
+                raise DatabaseError("The database operation failed.") from error
+        return []
 
     def _one(self, rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         return rows[0] if rows else None
@@ -375,18 +427,34 @@ class SupabaseDatabase:
         """Validate an end-user Supabase access token, never a caller-supplied ID."""
         if token == "11111111-1111-4111-8111-111111111111":
             return token
-        try:
-            response = self.client.auth.get_user(token)
-            user = getattr(response, "user", None) or getattr(response, "data", None)
-            if user is not None and hasattr(user, "user"):
-                user = user.user
-            userId = getattr(user, "id", None)
-            if not userId:
-                print(f"[AUTH DEBUG] Supabase get_user succeeded but returned no user ID. Raw response: {response}")
-            return str(userId) if userId else None
-        except Exception as error:
-            print(f"[AUTH DEBUG] Supabase SDK error during token validation: {error}")
-            return None
+        for attempt in range(2):
+            try:
+                response = self.client.auth.get_user(token)
+                user = getattr(response, "user", None) or getattr(response, "data", None)
+                if user is not None and hasattr(user, "user"):
+                    user = user.user
+                userId = getattr(user, "id", None)
+                if not userId:
+                    print(f"[AUTH DEBUG] Supabase get_user succeeded but returned no user ID. Raw response: {response}")
+                return str(userId) if userId else None
+            except Exception as error:
+                err_str = str(error)
+                err_type = type(error).__name__.lower()
+                is_socket_error = (
+                    "10035" in err_str
+                    or "socket" in err_str.lower()
+                    or "timeout" in err_str.lower()
+                    or "connection" in err_str.lower()
+                    or "readerror" in err_type
+                    or isinstance(error, (OSError, TimeoutError))
+                )
+                if is_socket_error and attempt == 0 and self.url and self.key:
+                    logger.warning("Auth token validation socket error: %s. Reconnecting client...", error)
+                    self._reset_client()
+                    continue
+                print(f"[AUTH DEBUG] Supabase SDK error during token validation: {error}")
+                return None
+        return None
 
     def createTool(self, name: str, description: str, inputSchema: Dict[str, Any], requiresApproval: bool = False, toolId: Optional[UUID] = None) -> Dict[str, Any]:
         row = {"id": _uuid(toolId or uuid4()), "name": name, "description": description, "input_schema": inputSchema, "requires_approval": requiresApproval}
@@ -568,7 +636,7 @@ def getDatabase() -> Any:
     try:
         if url and serviceRoleKey:
             from supabase import create_client
-            _database = SupabaseDatabase(create_client(url, serviceRoleKey))
+            _database = SupabaseDatabase(create_client(url, serviceRoleKey), url=url, key=serviceRoleKey)
             print(f"[AUTH DEBUG] SupabaseDatabase client successfully connected to {url}.")
             try:
                 _database.seedDemoTools()

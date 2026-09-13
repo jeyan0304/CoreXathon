@@ -476,3 +476,49 @@ def testFrameworkErrorsAlsoUseStrictErrorEnvelope(client: TestClient):
         "success": False,
         "error": {"code": "NOT_FOUND", "message": "Endpoint not found."},
     }
+
+
+def testApprovalRouteAliasesWorkSeamlessly(client: TestClient):
+    headers = {"Authorization": f"Bearer {USER_ID}"}
+    created = client.post("/api/workflows", headers=headers, json={"goal": "check and update"})
+    workflowId = created.json()["data"]["workflow"]["id"]
+    started = client.post(f"/api/workflows/{workflowId}/start-execution", headers=headers)
+    pendingStep = next(
+        step for step in started.json()["data"]["steps"]
+        if step["status"] == "WAITING_FOR_APPROVAL"
+    )
+
+    # Test that /approve endpoint (alias for /approve-action) functions properly
+    approved = client.post(
+        f"/api/workflows/{workflowId}/steps/{pendingStep['id']}/approve",
+        headers=headers,
+    )
+    assert approved.status_code == 200
+    assert approved.json()["success"] is True
+    # The step that was approved should now be completed
+    approved_steps = approved.json()["data"]["steps"]
+    approved_step_data = next(s for s in approved_steps if s["id"] == pendingStep["id"])
+    assert approved_step_data["status"] == "COMPLETED"
+
+
+def testSupabaseSocketErrorAutoRecovery():
+    import httpx
+
+    class MockQuery:
+        calls = 0
+
+        def execute(self):
+            MockQuery.calls += 1
+            if MockQuery.calls == 1:
+                raise httpx.ReadError("[WinError 10035] A non-blocking socket operation could not be completed immediately")
+            class Resp:
+                data = [{"id": "recovered"}]
+            return Resp()
+
+    db = SupabaseDatabase(None, url="https://example.supabase.co", key="fake-key")
+    reset_called = []
+    db._reset_client = lambda: reset_called.append(True)
+    res = db._execute(MockQuery())
+
+    assert res == [{"id": "recovered"}]
+    assert len(reset_called) == 1

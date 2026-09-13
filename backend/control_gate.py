@@ -435,7 +435,8 @@ class WorkflowControlGate:
 
     def _continueWorkflow(self, workflowId: Any, actor: str) -> Dict[str, Any]:
         workflow = self.database.getWorkflow(workflowId)
-        for step in self.database.listSteps(workflowId):
+        steps = self.database.listSteps(workflowId)
+        for step in steps:
             if step["status"] == WorkflowStatus.COMPLETED.value:
                 continue
             try:
@@ -466,12 +467,11 @@ class WorkflowControlGate:
                     pass
                 return self.database.getWorkflow(workflowId)
 
-            workflow = self.database.getWorkflow(workflowId)
             if result["status"] in {
                 WorkflowStatus.WAITING_FOR_APPROVAL.value,
                 WorkflowStatus.FAILED.value,
             }:
-                return workflow
+                return self.database.getWorkflow(workflowId)
 
         workflow = self.database.getWorkflow(workflowId)
         return self._transitionWorkflow(

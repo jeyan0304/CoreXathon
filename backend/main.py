@@ -294,6 +294,7 @@ def getPendingApprovals(
 
 
 @app.post("/api/workflows/{workflowId}/steps/{stepId}/approve-action")
+@app.post("/api/workflows/{workflowId}/steps/{stepId}/approve")
 def approveAction(
     workflowId: UUID,
     stepId: UUID,
@@ -305,6 +306,7 @@ def approveAction(
 
 
 @app.post("/api/workflows/{workflowId}/steps/{stepId}/reject-action")
+@app.post("/api/workflows/{workflowId}/steps/{stepId}/reject")
 def rejectAction(
     workflowId: UUID,
     stepId: UUID,
@@ -317,6 +319,7 @@ def rejectAction(
 
 
 @app.post("/api/workflows/{workflowId}/steps/{stepId}/retry-step")
+@app.post("/api/workflows/{workflowId}/steps/{stepId}/retry")
 def retryStep(
     workflowId: UUID,
     stepId: UUID,
