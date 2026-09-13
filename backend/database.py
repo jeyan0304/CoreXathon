@@ -38,6 +38,21 @@ except ImportError:
 
 logger = logging.getLogger("workflow_backend.database")
 
+_supabase_url = os.getenv("SUPABASE_URL")
+_supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+
+supabase_client: Optional[Any] = None
+if _supabase_url and _supabase_key and create_client is not None:
+    try:
+        supabase_client = create_client(
+            _supabase_url,
+            _supabase_key,
+            options=ClientOptions(postgrest_client_timeout=60) if ClientOptions is not None else None,
+        )
+        print("[AUTH DEBUG] Single global supabase_client successfully initialized.")
+    except Exception as _exc:
+        logger.warning("Could not initialize global supabase_client: %s", _exc)
+
 
 class DatabaseError(RuntimeError):
     """A sanitized persistence failure safe for the control layer."""
@@ -371,23 +386,6 @@ class SupabaseDatabase:
         self.client = client
         self.url = url
         self.key = key
-        self._lock = RLock()
-
-    def _reset_client(self) -> None:
-        """Safely re-create the Supabase client when socket or pool errors occur."""
-        with self._lock:
-            try:
-                if hasattr(self, "client") and hasattr(self.client, "postgrest") and hasattr(self.client.postgrest, "session"):
-                    self.client.postgrest.session.close()
-            except Exception:
-                pass
-            if self.url and self.key and create_client is not None:
-                try:
-                    options = ClientOptions(postgrest_client_timeout=30) if ClientOptions is not None else None
-                    self.client = create_client(self.url, self.key, options=options)
-                    logger.info("Successfully re-initialized Supabase client after socket/network reset.")
-                except Exception as exc:
-                    logger.error("Failed to re-initialize Supabase client: %s", exc)
 
     def _resolve_existing_record(self, query: Any) -> Optional[List[Dict[str, Any]]]:
         try:
@@ -455,18 +453,15 @@ class SupabaseDatabase:
                     or "networkerror" in err_type
                     or isinstance(error, (OSError, TimeoutError))
                 )
-                if is_socket_error and attempt < max_attempts - 1 and self.url and self.key:
+                if is_socket_error and attempt < max_attempts - 1:
                     logger.warning(
                         "Database socket/network error encountered (%s). "
-                        "Re-initializing Supabase client and retrying attempt %d/%d...",
+                        "Retrying attempt %d/%d on global client...",
                         error,
                         attempt + 2,
                         max_attempts,
                     )
-                    time.sleep(0.15 * (attempt + 1))
-                    self._reset_client()
-                    if hasattr(query, "request") and hasattr(query.request, "session"):
-                        query.request.session = self.client.postgrest.session
+                    time.sleep(0.3 * (attempt + 1))
                     continue
                 logger.error("The database operation failed: %s", error, exc_info=True)
                 raise DatabaseError("The database operation failed.") from error
@@ -507,9 +502,9 @@ class SupabaseDatabase:
                     or "readerror" in err_type
                     or isinstance(error, (OSError, TimeoutError))
                 )
-                if is_socket_error and attempt == 0 and self.url and self.key:
-                    logger.warning("Auth token validation socket error: %s. Reconnecting client...", error)
-                    self._reset_client()
+                if is_socket_error and attempt == 0:
+                    logger.warning("Auth token validation socket error: %s. Retrying...", error)
+                    time.sleep(0.3)
                     continue
                 print(f"[AUTH DEBUG] Supabase SDK error during token validation: {error}")
                 return None
@@ -693,7 +688,7 @@ _database: Optional[Any] = None
 
 def getDatabase() -> Any:
     """Return the configured server database without exposing its credentials."""
-    global _database
+    global _database, supabase_client
     if _database is not None:
         return _database
 
@@ -710,10 +705,13 @@ def getDatabase() -> Any:
             f"Falling back to InMemoryDatabase."
         )
     try:
-        if url and serviceRoleKey and create_client is not None:
-            options = ClientOptions(postgrest_client_timeout=30) if ClientOptions is not None else None
-            _database = SupabaseDatabase(create_client(url, serviceRoleKey, options=options), url=url, key=serviceRoleKey)
-            print(f"[AUTH DEBUG] SupabaseDatabase client successfully connected to {url}.")
+        if supabase_client is None and url and serviceRoleKey and create_client is not None:
+            options = ClientOptions(postgrest_client_timeout=60) if ClientOptions is not None else None
+            supabase_client = create_client(url, serviceRoleKey, options=options)
+
+        if supabase_client is not None:
+            _database = SupabaseDatabase(supabase_client)
+            print(f"[AUTH DEBUG] SupabaseDatabase client successfully connected using global client.")
             try:
                 _database.seedDemoTools()
             except Exception as e:

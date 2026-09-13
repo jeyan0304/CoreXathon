@@ -46,36 +46,58 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
   const waitingApprovalStep = steps.find((step) => step.status === 'WAITING_FOR_APPROVAL');
   const failedStep = steps.find((step) => step.status === 'FAILED');
 
-  // Subscribe to realtime workflow updates when activeWorkflow is set
+  // Poll workflow updates when activeWorkflow is set using recursive setTimeout
   useEffect(() => {
     if (!workflowId) return;
 
-    const unsubscribe = apiService.subscribeToWorkflow(workflowId, (data) => {
-      const updatedWf: Workflow = {
-        id: data.id,
-        user_id: data.user_id,
-        goal: data.goal,
-        status: data.status,
-        created_at: data.created_at,
-        updated_at: data.updated_at,
-      };
-      setActiveWorkflow(updatedWf);
-      setSteps(data.steps);
+    let isSubscribed = true;
+    let timerId: ReturnType<typeof setTimeout> | undefined;
 
-      // Trigger celebratory confetti once when completed
-      if (data.status === 'COMPLETED' && !hasTriggeredConfetti) {
-        setHasTriggeredConfetti(true);
-        confetti({
-          particleCount: 80,
-          spread: 70,
-          origin: { y: 0.6 },
-          colors: ['#2563eb', '#10b981', '#f59e0b', '#6366f1'],
-        });
+    const pollWorkflow = async () => {
+      try {
+        const result = await apiService.getWorkflow(workflowId);
+        if (!isSubscribed) return;
+
+        if (result.success) {
+          const data = result.data;
+          const updatedWf: Workflow = {
+            id: data.id,
+            user_id: data.user_id,
+            goal: data.goal,
+            status: data.status,
+            created_at: data.created_at,
+            updated_at: data.updated_at,
+          };
+          setActiveWorkflow(updatedWf);
+          setSteps(data.steps);
+
+          // Trigger celebratory confetti once when completed
+          if (data.status === 'COMPLETED' && !hasTriggeredConfetti) {
+            setHasTriggeredConfetti(true);
+            confetti({
+              particleCount: 80,
+              spread: 70,
+              origin: { y: 0.6 },
+              colors: ['#2563eb', '#10b981', '#f59e0b', '#6366f1'],
+            });
+          }
+        }
+      } catch (err) {
+        console.error('[WorkflowExecutionPage] Polling error:', err);
+      } finally {
+        if (isSubscribed) {
+          timerId = setTimeout(pollWorkflow, 2000);
+        }
       }
-    });
+    };
 
-    return () => unsubscribe();
-  }, [workflowId, hasTriggeredConfetti, currentPlan]);
+    pollWorkflow();
+
+    return () => {
+      isSubscribed = false;
+      if (timerId) clearTimeout(timerId);
+    };
+  }, [workflowId, hasTriggeredConfetti]);
 
   // Handle plan generation from goal
   const handleGeneratePlan = async (e?: React.FormEvent, overrideGoal?: string) => {
@@ -263,27 +285,27 @@ export const WorkflowExecutionPage: React.FC<WorkflowExecutionPageProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono">
-            <span className={`px-2 py-0.5 rounded ${!activeWorkflow ? 'bg-blue-100 text-blue-800 font-bold' : 'bg-slate-100 text-slate-500'}`}>
+            <span className={`px-2 py-0.5 rounded ${!activeWorkflow ? 'bg-blue-100 text-blue-900 font-bold' : 'bg-slate-100 text-slate-700'}`}>
               1. Goal Input
             </span>
             <span className="text-slate-300">→</span>
-            <span className={`px-2 py-0.5 rounded ${currentPlan && activeWorkflow?.status === 'PENDING' ? 'bg-blue-100 text-blue-800 font-bold' : 'bg-slate-100 text-slate-500'}`}>
+            <span className={`px-2 py-0.5 rounded ${currentPlan && activeWorkflow?.status === 'PENDING' ? 'bg-blue-100 text-blue-900 font-bold' : 'bg-slate-100 text-slate-700'}`}>
               2. Review Plan
             </span>
             <span className="text-slate-300">→</span>
-            <span className={`px-2 py-0.5 rounded ${steps.length > 0 && steps[0].status === 'COMPLETED' ? 'bg-emerald-100 text-emerald-800 font-bold' : 'bg-slate-100 text-slate-500'}`}>
+            <span className={`px-2 py-0.5 rounded ${steps.length > 0 && steps[0].status === 'COMPLETED' ? 'bg-emerald-100 text-emerald-800 font-bold' : 'bg-slate-100 text-slate-700'}`}>
               3. Search (Done)
             </span>
             <span className="text-slate-300">→</span>
-            <span className={`px-2 py-0.5 rounded ${waitingApprovalStep ? 'bg-amber-100 text-amber-800 font-bold animate-pulse' : steps.some((step) => step.requires_approval && step.status === 'COMPLETED') ? 'bg-emerald-100 text-emerald-800 font-bold' : 'bg-slate-100 text-slate-500'}`}>
+            <span className={`px-2 py-0.5 rounded ${waitingApprovalStep ? 'bg-amber-100 text-amber-800 font-bold animate-pulse' : steps.some((step) => step.requires_approval && step.status === 'COMPLETED') ? 'bg-emerald-100 text-emerald-800 font-bold' : 'bg-slate-100 text-slate-700'}`}>
               4. Your Approval
             </span>
             <span className="text-slate-300">→</span>
-            <span className={`px-2 py-0.5 rounded ${failedStep ? 'bg-rose-100 text-rose-800 font-bold' : steps.some((step) => step.retry_count > 0 && step.status === 'COMPLETED') ? 'bg-emerald-100 text-emerald-800 font-bold' : 'bg-slate-100 text-slate-500'}`}>
+            <span className={`px-2 py-0.5 rounded ${failedStep ? 'bg-rose-100 text-rose-800 font-bold' : steps.some((step) => step.retry_count > 0 && step.status === 'COMPLETED') ? 'bg-emerald-100 text-emerald-800 font-bold' : 'bg-slate-100 text-slate-700'}`}>
               5. Error & Retry
             </span>
             <span className="text-slate-300">→</span>
-            <span className={`px-2 py-0.5 rounded ${activeWorkflow?.status === 'COMPLETED' ? 'bg-emerald-600 text-white font-bold shadow-xs' : 'bg-slate-100 text-slate-500'}`}>
+            <span className={`px-2 py-0.5 rounded ${activeWorkflow?.status === 'COMPLETED' ? 'bg-emerald-600 text-white font-bold shadow-xs' : 'bg-slate-100 text-slate-700'}`}>
               6. Done
             </span>
           </div>

@@ -21,20 +21,33 @@ export function App() {
     return () => window.removeEventListener('corexathon:unauthorized', handleUnauthorized);
   }, []);
 
-  // Poll or check for pending approvals to badge the nav
+  // Poll or check for pending approvals to badge the nav using recursive setTimeout
   useEffect(() => {
     if (!authenticated) return;
+    let isSubscribed = true;
+    let timerId: ReturnType<typeof setTimeout> | undefined;
+
     const checkApprovals = async () => {
-      const res = await apiService.getWorkflows();
-      if (res.success) {
-        const waiting = res.data.filter((w) => w.status === 'WAITING_FOR_APPROVAL').length;
-        setPendingApprovalsCount(waiting);
+      try {
+        const res = await apiService.getWorkflows();
+        if (isSubscribed && res.success) {
+          const waiting = res.data.filter((w) => w.status === 'WAITING_FOR_APPROVAL').length;
+          setPendingApprovalsCount(waiting);
+        }
+      } catch (err) {
+        console.error('Failed to poll approvals:', err);
+      } finally {
+        if (isSubscribed) {
+          timerId = setTimeout(checkApprovals, 2000);
+        }
       }
     };
 
     checkApprovals();
-    const interval = setInterval(checkApprovals, 2000);
-    return () => clearInterval(interval);
+    return () => {
+      isSubscribed = false;
+      if (timerId) clearTimeout(timerId);
+    };
   }, [authenticated]);
 
   if (!authenticated) {

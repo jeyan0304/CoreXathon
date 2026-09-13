@@ -515,13 +515,11 @@ def testSupabaseSocketErrorAutoRecovery():
                 data = [{"id": "recovered"}]
             return Resp()
 
-    db = SupabaseDatabase(None, url="https://example.supabase.co", key="fake-key")
-    reset_called = []
-    db._reset_client = lambda: reset_called.append(True)
+    db = SupabaseDatabase(None)
     res = db._execute(MockQuery())
 
     assert res == [{"id": "recovered"}]
-    assert len(reset_called) == 1
+    assert MockQuery.calls == 2
 
 
 def testPostgrestUniqueViolation23505HandledGracefully():

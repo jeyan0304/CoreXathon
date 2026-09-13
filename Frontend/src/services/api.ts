@@ -123,19 +123,20 @@ export class RealWorkflowApiService implements IWorkflowApiService {
 
   private async request(path: string, method = 'GET', body?: unknown): Promise<unknown> {
     const accessToken = this.accessTokenProvider() || DEMO_USER_UUID;
+    const isApproval = path.includes('/approve');
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
+    const timer = isApproval ? undefined : setTimeout(() => controller.abort(), 60000);
     try {
       const response = await fetch(`${this.baseUrl}${path}`, {
         method,
-        signal: controller.signal,
+        signal: isApproval ? undefined : controller.signal,
         headers: {
           Authorization: `Bearer ${accessToken}`,
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       const payload: unknown = await response.json().catch(() => null);
       if (response.status === 401 && this.accessTokenProvider()) clearSession();
       if (!response.ok) {
@@ -143,7 +144,7 @@ export class RealWorkflowApiService implements IWorkflowApiService {
       }
       return payload;
     } catch (err) {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       throw err;
     }
   }
@@ -249,11 +250,27 @@ export class RealWorkflowApiService implements IWorkflowApiService {
   }
 
   subscribeToWorkflow(workflowId: string, onUpdate: (workflow: Workflow & { steps: WorkflowStep[] }) => void): () => void {
-    const timer = window.setInterval(async () => {
-      const result = await this.getWorkflow(workflowId);
-      if (result.success) onUpdate(result.data);
-    }, 2000);
-    return () => window.clearInterval(timer);
+    let active = true;
+    let timer: number | undefined;
+
+    const poll = async () => {
+      try {
+        const result = await this.getWorkflow(workflowId);
+        if (active && result.success) onUpdate(result.data);
+      } catch (err) {
+        console.error('Workflow poll error:', err);
+      } finally {
+        if (active) {
+          timer = window.setTimeout(poll, 2000);
+        }
+      }
+    };
+
+    poll();
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }
 }
 

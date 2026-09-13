@@ -73,7 +73,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
       <div className="rounded-2xl border border-slate-200 bg-gradient-to-r from-blue-50/70 via-indigo-50/40 to-white p-6 sm:p-8 shadow-xs">
         <div className="flex flex-wrap items-center justify-between gap-6">
           <div className="max-w-xl space-y-2">
-            <div className="inline-flex items-center gap-1.5 rounded-full bg-blue-100/80 px-3 py-0.5 text-xs font-bold text-blue-800">
+            <div className="inline-flex items-center gap-1.5 rounded-full bg-blue-100/80 px-3 py-0.5 text-xs font-bold text-blue-900">
               <ShieldCheck className="h-3.5 w-3.5 text-blue-600" />
               AI Assistant with Built-in Safety Checkpoints
             </div>
