@@ -16,14 +16,15 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from control_gate import ControlGateError, WorkflowControlGate
-from database import DatabaseError, getDatabase
-
-
-repositoryRoot = Path(__file__).resolve().parent.parent
+backendDir = Path(__file__).resolve().parent
+repositoryRoot = backendDir.parent
+if str(backendDir) not in sys.path:
+    sys.path.insert(0, str(backendDir))
 if str(repositoryRoot) not in sys.path:
     sys.path.append(str(repositoryRoot))
 
+from control_gate import ControlGateError, WorkflowControlGate
+from database import DatabaseError, getDatabase
 from planner import generate_plan
 
 
@@ -33,7 +34,7 @@ app = FastAPI(title="AI Workflow Automation Platform", version="1.0.0")
 # --- CORS Configuration Added Here ---
 corsOrigins = [
     origin.strip()
-    for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+    for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
     if origin.strip()
 ]
 
@@ -171,18 +172,21 @@ def getCurrentUserId(
     gate: WorkflowControlGate = Depends(getControlGate),
 ) -> UUID:
     """Authenticate a Supabase bearer token and return its verified user ID."""
-    if not authorization or not authorization.startswith("Bearer "):
+    if not authorization or not authorization.lower().startswith("bearer "):
+        print(f"[AUTH DEBUG] Authorization header missing or does not start with 'Bearer ': {authorization}")
         raise ControlGateError(
             "UNAUTHORIZED", "A valid bearer access token is required.", 401
         )
-    token = authorization.removeprefix("Bearer ").strip()
+    token = authorization[7:].strip()
     if not token:
+        print("[AUTH DEBUG] Bearer token is empty after removing 'Bearer ' prefix.")
         raise ControlGateError(
             "UNAUTHORIZED", "A valid bearer access token is required.", 401
         )
     try:
         return gate.authenticateToken(token)
     except (ValueError, AttributeError) as error:
+        print(f"[AUTH DEBUG] Token authentication failed with error: {error}")
         raise ControlGateError(
             "UNAUTHORIZED", "A valid bearer access token is required.", 401
         ) from error

@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import type { Workflow, Tool } from '../types';
 import { apiService } from '../services/api';
-import { INITIAL_SAMPLE_WORKFLOWS, INITIAL_REGISTERED_TOOLS } from '../services/mockData';
 import { StatusBadge } from '../components/StatusBadge';
 import { Loader } from '../components/Loader';
 import {
@@ -28,9 +27,9 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
   onNavigateToTools,
   onNavigateToAudit,
 }) => {
-  const [workflows, setWorkflows] = useState<Workflow[]>(() => INITIAL_SAMPLE_WORKFLOWS);
-  const [tools, setTools] = useState<Tool[]>(() => INITIAL_REGISTERED_TOOLS);
-  const [loading, setLoading] = useState(false);
+  const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [tools, setTools] = useState<Tool[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let isMounted = true;
@@ -41,10 +40,10 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
           apiService.getTools(),
         ]);
         if (isMounted) {
-          if (wfRes.success && wfRes.data && wfRes.data.length > 0) {
+          if (wfRes.success && wfRes.data) {
             setWorkflows(wfRes.data);
           }
-          if (toolRes.success && toolRes.data && toolRes.data.length > 0) {
+          if (toolRes.success && toolRes.data) {
             setTools(toolRes.data);
           }
         }

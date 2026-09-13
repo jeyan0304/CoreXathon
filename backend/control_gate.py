@@ -10,6 +10,13 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 
 from database import DatabaseError
+try:
+    from tool_contracts import REGISTERED_TOOLS
+except ImportError:
+    try:
+        from backend.tool_contracts import REGISTERED_TOOLS
+    except ImportError:
+        REGISTERED_TOOLS = {}
 
 
 MAX_STEPS = 10
@@ -59,7 +66,7 @@ class ControlGateError(RuntimeError):
 
 def _searchInformation(arguments: Dict[str, Any], step: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "query": arguments["query"],
+        "query": arguments.get("query", ""),
         "result": "Project status information found.",
         "source": "demo_data",
     }
@@ -67,17 +74,18 @@ def _searchInformation(arguments: Dict[str, Any], step: Dict[str, Any]) -> Dict[
 
 def _updateRecord(arguments: Dict[str, Any], step: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "record_id": arguments["record_id"],
-        "status": arguments["status"],
+        "record_id": arguments.get("record_id", "project_record"),
+        "status": arguments.get("status", "completed"),
         "updated": True,
     }
 
 
 def _sendNotification(arguments: Dict[str, Any], step: Dict[str, Any]) -> Dict[str, Any]:
-    if arguments.get("fail_once") and step["retry_count"] == 0:
+    retry_count = step.get("retry_count", 0) if isinstance(step, dict) else 0
+    if arguments.get("fail_once") and retry_count == 0:
         raise RuntimeError("Simulated notification network failure.")
     return {
-        "recipient": arguments["recipient"],
+        "recipient": arguments.get("recipient", "team"),
         "delivery_status": "sent",
     }
 
@@ -201,6 +209,7 @@ class WorkflowControlGate:
     def authenticateToken(self, token: str) -> UUID:
         userId = self.database.authenticateToken(token)
         if userId is None:
+            print("[AUTH DEBUG] authenticateToken: Token rejected by database adapter. Throwing 401 UNAUTHORIZED.")
             raise ControlGateError(
                 "UNAUTHORIZED", "A valid authenticated user is required.", 401
             )
@@ -211,11 +220,19 @@ class WorkflowControlGate:
         steps = []
         for step in self.database.listSteps(workflowId):
             tool = self.database.getTool(step["tool_id"])
+            tool_name = tool["name"] if tool else step.get("tool_name")
+            req_approval = bool(tool and tool.get("requires_approval"))
+            if tool_name in REGISTERED_TOOLS:
+                req_approval = bool(REGISTERED_TOOLS[tool_name].get("requires_approval", req_approval))
+            error_message = step.get("error_message")
+            if not error_message and isinstance(step.get("output"), dict):
+                error_message = step["output"].get("error")
             steps.append(
                 {
                     **step,
-                    "tool_name": tool["name"] if tool else None,
-                    "requires_approval": bool(tool and tool["requires_approval"]),
+                    "tool_name": tool_name,
+                    "requires_approval": req_approval,
+                    "error_message": error_message,
                 }
             )
         return {**workflow, "steps": steps}
@@ -281,37 +298,77 @@ class WorkflowControlGate:
     ) -> Dict[str, Any]:
         if step["status"] == WorkflowStatus.COMPLETED.value:
             return step
-        if step["retry_count"] >= MAX_RETRIES:
+        if step.get("retry_count", 0) >= MAX_RETRIES:
             raise ControlGateError(
                 "RETRY_LIMIT_REACHED", "The maximum of 3 retries has been reached.", 409
             )
         tool = self.database.getTool(step["tool_id"])
+        tool_name = tool["name"] if tool else step.get("tool_name")
+
+        # Safety Checkpoint: Determine if approval is required using tool record, falling back to registered tool contract
+        requires_approval = bool(tool and tool.get("requires_approval"))
+        if tool_name in REGISTERED_TOOLS:
+            requires_approval = bool(REGISTERED_TOOLS[tool_name].get("requires_approval", requires_approval))
+
         try:
-            if tool is None or tool["name"] not in self.executors:
+            if tool is None or tool_name not in self.executors:
                 raise ControlGateError(
-                    "UNKNOWN_TOOL", "The requested tool is not registered."
+                    "UNKNOWN_TOOL", f"The requested tool '{tool_name}' is not registered."
                 )
-            self._validateArguments(tool, step["arguments"])
+            self._validateArguments(tool, step.get("arguments", {}))
         except ControlGateError as error:
             message = "Tool failed deterministic validation before execution."
             failedStep = self._setStep(
                 step,
-                {"status": WorkflowStatus.FAILED.value, "output": {"error": message}},
+                {
+                    "status": WorkflowStatus.FAILED.value,
+                    "output": {"error": message},
+                    "error_message": message,
+                },
                 "SYSTEM",
                 "TOOL_VALIDATION_FAILED",
                 {"code": error.code, "message": error.message},
             )
             currentWorkflow = self.database.getWorkflow(workflow["id"])
-            self._transitionWorkflow(
-                currentWorkflow,
-                WorkflowStatus.FAILED,
+            try:
+                self._transitionWorkflow(
+                    currentWorkflow,
+                    WorkflowStatus.FAILED,
+                    "SYSTEM",
+                    "WORKFLOW_FAILED",
+                    {"step_id": step["id"], "reason": error.code},
+                )
+            except Exception:
+                pass
+            return failedStep
+        except Exception as error:
+            message = f"Validation exception: {str(error)}"
+            failedStep = self._setStep(
+                step,
+                {
+                    "status": WorkflowStatus.FAILED.value,
+                    "output": {"error": message},
+                    "error_message": message,
+                },
                 "SYSTEM",
-                "WORKFLOW_FAILED",
-                {"step_id": step["id"], "reason": error.code},
+                "TOOL_VALIDATION_FAILED",
+                {"code": "VALIDATION_ERROR", "message": message},
             )
+            currentWorkflow = self.database.getWorkflow(workflow["id"])
+            try:
+                self._transitionWorkflow(
+                    currentWorkflow,
+                    WorkflowStatus.FAILED,
+                    "SYSTEM",
+                    "WORKFLOW_FAILED",
+                    {"step_id": step["id"], "reason": message},
+                )
+            except Exception:
+                pass
             return failedStep
 
-        if tool["requires_approval"] and not self.database.hasAuditAction(
+        # Safety Checkpoint: Pause pipeline if tool requires approval and approval hasn't been granted
+        if requires_approval and not self.database.hasAuditAction(
             workflow["id"], step["id"], "APPROVAL_GRANTED"
         ):
             waitingStep = self._setStep(
@@ -319,7 +376,7 @@ class WorkflowControlGate:
                 {"status": WorkflowStatus.WAITING_FOR_APPROVAL.value},
                 "SYSTEM",
                 "APPROVAL_REQUESTED",
-                {"tool_name": tool["name"], "arguments": step["arguments"]},
+                {"tool_name": tool_name, "arguments": step.get("arguments", {})},
             )
             self._transitionWorkflow(
                 workflow,
@@ -330,34 +387,42 @@ class WorkflowControlGate:
             )
             return waitingStep
 
+        # Step is approved or doesn't require approval - transition to RUNNING and execute
         runningStep = self._setStep(
             step,
             {"status": WorkflowStatus.RUNNING.value},
             "SYSTEM",
             "TOOL_EXECUTION_STARTED",
-            {"tool_name": tool["name"]},
+            {"tool_name": tool_name},
         )
         try:
-            output = self.executors[tool["name"]](runningStep["arguments"], runningStep)
+            if tool_name not in self.executors:
+                raise RuntimeError(f"Missing executor implementation for tool '{tool_name}'.")
+            output = self.executors[tool_name](runningStep.get("arguments", {}), runningStep)
         except Exception as error:
+            error_msg = str(error) or f"Internal tool execution error during '{tool_name}'."
             failedStep = self._setStep(
                 runningStep,
                 {
                     "status": WorkflowStatus.FAILED.value,
-                    "output": {"error": str(error)},
+                    "output": {"error": error_msg},
+                    "error_message": error_msg,
                 },
                 "SYSTEM",
                 "TOOL_EXECUTION_FAILED",
-                {"tool_name": tool["name"], "error": str(error)},
+                {"tool_name": tool_name, "error": error_msg},
             )
             currentWorkflow = self.database.getWorkflow(workflow["id"])
-            self._transitionWorkflow(
-                currentWorkflow,
-                WorkflowStatus.FAILED,
-                "SYSTEM",
-                "WORKFLOW_FAILED",
-                {"step_id": step["id"]},
-            )
+            try:
+                self._transitionWorkflow(
+                    currentWorkflow,
+                    WorkflowStatus.FAILED,
+                    "SYSTEM",
+                    "WORKFLOW_FAILED",
+                    {"step_id": step["id"], "reason": error_msg},
+                )
+            except Exception:
+                pass
             return failedStep
 
         return self._setStep(
@@ -365,7 +430,7 @@ class WorkflowControlGate:
             {"status": WorkflowStatus.COMPLETED.value, "output": output},
             "SYSTEM",
             "TOOL_EXECUTION_SUCCEEDED",
-            {"tool_name": tool["name"], "output": output},
+            {"tool_name": tool_name, "output": output},
         )
 
     def _continueWorkflow(self, workflowId: Any, actor: str) -> Dict[str, Any]:
@@ -373,7 +438,34 @@ class WorkflowControlGate:
         for step in self.database.listSteps(workflowId):
             if step["status"] == WorkflowStatus.COMPLETED.value:
                 continue
-            result = self._executeStep(workflow, step, actor)
+            try:
+                result = self._executeStep(workflow, step, actor)
+            except Exception as exc:
+                error_msg = str(exc) or "Unexpected error during workflow execution."
+                try:
+                    self._setStep(
+                        step,
+                        {
+                            "status": WorkflowStatus.FAILED.value,
+                            "output": {"error": error_msg},
+                            "error_message": error_msg,
+                        },
+                        "SYSTEM",
+                        "TOOL_EXECUTION_FAILED",
+                        {"error": error_msg},
+                    )
+                    curr = self.database.getWorkflow(workflowId)
+                    self._transitionWorkflow(
+                        curr,
+                        WorkflowStatus.FAILED,
+                        "SYSTEM",
+                        "WORKFLOW_FAILED",
+                        {"step_id": step.get("id"), "reason": error_msg},
+                    )
+                except Exception:
+                    pass
+                return self.database.getWorkflow(workflowId)
+
             workflow = self.database.getWorkflow(workflowId)
             if result["status"] in {
                 WorkflowStatus.WAITING_FOR_APPROVAL.value,

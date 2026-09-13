@@ -1,21 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import type { Tool } from '../types';
 import { apiService } from '../services/api';
-import { INITIAL_REGISTERED_TOOLS } from '../services/mockData';
 import { ToolRegistryTable } from '../components/ToolRegistryTable';
 import { Loader } from '../components/Loader';
 import { ShieldCheck, Info } from 'lucide-react';
 
 export const ToolRegistryPage: React.FC = () => {
-  const [tools, setTools] = useState<Tool[]>(() => INITIAL_REGISTERED_TOOLS);
-  const [loading, setLoading] = useState(false);
+  const [tools, setTools] = useState<Tool[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let isMounted = true;
     const loadTools = async () => {
       try {
         const res = await apiService.getTools();
-        if (isMounted && res.success && res.data && res.data.length > 0) {
+        if (isMounted && res.success && res.data) {
           setTools(res.data);
         }
       } finally {

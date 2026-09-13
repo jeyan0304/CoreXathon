@@ -7,8 +7,12 @@ tests and local demos; it is never selected when Supabase credentials exist.
 
 from __future__ import annotations
 
+from pathlib import Path
 from dotenv import load_dotenv
 
+_backendEnv = Path(__file__).resolve().parent / ".env"
+if _backendEnv.exists():
+    load_dotenv(_backendEnv)
 load_dotenv()
 
 import copy
@@ -56,12 +60,11 @@ class InMemoryDatabase:
         with self._lock:
             if token in self.users:
                 return token
-            try:
-                UUID(token)
+            if token == "11111111-1111-4111-8111-111111111111":
                 self.users[token] = {"id": token, "email": "demo@corex.ai", "created_at": _now()}
                 return token
-            except ValueError:
-                return None
+            print(f"[AUTH DEBUG] InMemoryDatabase rejecting token (active mode is in-memory; SUPABASE_SERVICE_ROLE_KEY not configured): {token[:30]}...")
+            return None
 
     def createTool(
         self,
@@ -244,7 +247,7 @@ class InMemoryDatabase:
         return self._copy(rows)
 
     def updateStep(self, stepId: Any, changes: Dict[str, Any]) -> Dict[str, Any]:
-        allowed = {"status", "output", "retry_count"}
+        allowed = {"status", "output", "retry_count", "error_message"}
         if not changes or not set(changes).issubset(allowed):
             raise DatabaseError("Invalid workflow step update.")
         with self._lock:
@@ -378,8 +381,11 @@ class SupabaseDatabase:
             if user is not None and hasattr(user, "user"):
                 user = user.user
             userId = getattr(user, "id", None)
+            if not userId:
+                print(f"[AUTH DEBUG] Supabase get_user succeeded but returned no user ID. Raw response: {response}")
             return str(userId) if userId else None
-        except Exception:
+        except Exception as error:
+            print(f"[AUTH DEBUG] Supabase SDK error during token validation: {error}")
             return None
 
     def createTool(self, name: str, description: str, inputSchema: Dict[str, Any], requiresApproval: bool = False, toolId: Optional[UUID] = None) -> Dict[str, Any]:
@@ -464,9 +470,18 @@ class SupabaseDatabase:
         return self._execute(self.client.table("workflow_steps").select("*").eq("workflow_id", _uuid(workflowId)).order("step_order"))
 
     def updateStep(self, stepId: Any, changes: Dict[str, Any]) -> Dict[str, Any]:
-        result = self._one(self._execute(self.client.table("workflow_steps").update(changes).eq("id", _uuid(stepId))))
+        cleanChanges = dict(changes)
+        err_msg = cleanChanges.pop("error_message", None)
+        if err_msg:
+            if "output" not in cleanChanges or cleanChanges["output"] is None:
+                cleanChanges["output"] = {"error": err_msg}
+            elif isinstance(cleanChanges.get("output"), dict) and "error" not in cleanChanges["output"]:
+                cleanChanges["output"]["error"] = err_msg
+        result = self._one(self._execute(self.client.table("workflow_steps").update(cleanChanges).eq("id", _uuid(stepId))))
         if result is None:
             raise DatabaseError("Workflow step not found.")
+        if err_msg and "error_message" not in result:
+            result["error_message"] = err_msg
         return result
 
     def claimApproval(self, stepId: Any) -> Optional[Dict[str, Any]]:
@@ -543,12 +558,25 @@ def getDatabase() -> Any:
         os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         or os.getenv("SUPABASE_KEY")
     )
+    if not url or not serviceRoleKey:
+        print(
+            f"[AUTH DEBUG] Supabase credentials not fully configured "
+            f"(SUPABASE_URL={'SET' if url else 'MISSING'}, "
+            f"SUPABASE_SERVICE_ROLE_KEY={'SET' if serviceRoleKey else 'MISSING'}). "
+            f"Falling back to InMemoryDatabase."
+        )
     try:
         if url and serviceRoleKey:
             from supabase import create_client
             _database = SupabaseDatabase(create_client(url, serviceRoleKey))
+            print(f"[AUTH DEBUG] SupabaseDatabase client successfully connected to {url}.")
+            try:
+                _database.seedDemoTools()
+            except Exception as e:
+                print(f"[TOOL SEED DEBUG] Could not auto-seed Supabase tools: {e}")
             return _database
-    except Exception:
+    except Exception as exc:
+        print(f"[AUTH DEBUG] Failed to initialize Supabase client ({exc}). Falling back to InMemoryDatabase.")
         pass
 
     _database = InMemoryDatabase()
